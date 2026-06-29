@@ -75,10 +75,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    from src.infrastructure.persistence.elasticsearch.repository import (
+        CrawledPropertyESRepository,
+    )
+    from src.infrastructure.persistence.redis.cache import CacheRepository
+    from src.infrastructure.persistence.redis.job_repo import JobRepository
+    from src.infrastructure.persistence.redis.idempotency import IdempotencyRepository
+
+    search_repo = CrawledPropertyESRepository(es, settings.es_index_prefix)
+    cache_repo = CacheRepository(redis, bedrock_client, settings.redis_cache_ttl)
+    job_repo = JobRepository(redis)
+    idem_repo = IdempotencyRepository(redis, settings.idempotency_ttl)
+
     deps = ToolDependencies(
         brave_client=brave_client,
         firecrawl_client=firecrawl_client,
         bedrock_client=bedrock_client,
+        search_repo=search_repo,
+        cache_repo=cache_repo,
+        job_repo=job_repo,
+        idem_repo=idem_repo,
     )
     tools = registry.create_all(deps)
     deps.tools = tools
