@@ -8,6 +8,8 @@ class ToolDependencies:
     # Infrastructure clients (injected at startup)
     brave_client: Any = None
     firecrawl_client: Any = None
+    searxng_client: Any = None
+    crawl4ai_client: Any = None
     bedrock_client: Any = None
     search_repo: Any = None
     cache_repo: Any = None

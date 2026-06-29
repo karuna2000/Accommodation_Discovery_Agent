@@ -1,6 +1,14 @@
+export interface ExecuteEvent {
+  step_index: number;
+  results?: Record<string, unknown>[];
+  result?: string;
+  error?: string;
+  step_vars?: Record<string, string>;
+}
+
 export interface AgentEvent {
   plan?: { plan: string };
-  execute?: { step_index: number; result: string };
+  execute?: ExecuteEvent;
   evaluate?: { decision: string };
   synthesize?: { synthesized_answer: string };
   [key: string]: unknown;
@@ -20,9 +28,20 @@ export interface EventPayload {
 
 export type ServerMessage = EventPayload | DonePayload;
 
+export interface StepInfo {
+  id: string;
+  type: "plan" | "execute" | "evaluate" | "synthesize";
+  label: string;
+  summary: string;
+  detail: string;
+  status: "running" | "done" | "error";
+  results?: Record<string, unknown>[];
+  toolName?: string;
+}
+
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant" | "system" | "plan" | "execute" | "evaluate";
+  role: "user" | "assistant";
   content: string;
   timestamp: number;
 }

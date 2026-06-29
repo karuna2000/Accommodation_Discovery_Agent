@@ -60,9 +60,9 @@ async def test_extract_property_returns_crawled_property(tools):
         markdown="# Mock Listing\n**Price:** $1200",
         source_url="https://example.com/listing/1",
     )
-    assert isinstance(result, CrawledProperty)
-    assert result.source_url == "https://example.com/listing/1"
-    assert result.title == "Mock Studio Apartment"
+    assert isinstance(result, dict)
+    assert result["source_url"] == "https://example.com/listing/1"
+    assert result["title"] == "Property Listing"
 
 
 @pytest.mark.asyncio

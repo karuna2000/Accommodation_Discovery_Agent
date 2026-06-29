@@ -1,16 +1,18 @@
 # Accommodation Discovery Agent — Project Context
 
 ## Goal
-Build an AI-powered accommodation discovery platform that crawls listings from the web, extracts structured property data, caches it in Elasticsearch, and serves conversational search results via an agentic LLM loop.
+Build an AI-powered accommodation discovery platform that crawls listings from the web, extracts structured property data, caches it in Elasticsearch, and serves conversational search results via an agentic LLM loop with self-hosted search and scraping infrastructure.
 
 ## Constraints & Preferences
 - Pure crawl-based architecture: no owner ingestion, no DynamoDB, no student accounts, no booking flow
 - Agentic solution using LangGraph for plan–execute–evaluate loops, with MCP server for tool decoupling
-- All services run on a single EC2 t3.micro (free tier): FastAPI, Elasticsearch 8.x, Redis, all in docker-compose
-- FireCrawl API (not Playwright) for JS-rendered page scraping; Brave Search API for URL discovery; Bedrock Claude 3 Sonnet + Haiku fallback for LLM; Titan Embeddings v2 for vectors
-- Requests must be idempotent via `Idempotency-Key` header (Redis-backed, 24h TTL)
+- All services on a single EC2 t3.micro: FastAPI, Elasticsearch 8.x, Redis, SearXNG, Crawl4AI, all in docker-compose
+- Self-hosted by default: SearXNG replaces Brave Search; Crawl4AI replaces FireCrawl API
+- Bedrock for LLM + embeddings — Claude models blocked (need Anthropic use case form); Amazon Nova Micro (`us.amazon.nova-micro-v1:0`) and Cohere Embed v4 (`us.cohere.embed-v4:0`) work immediately
+- Plan is static (5-step hardcoded, not LLM-generated): Nova outputs unreliable plan format
+- Requests idempotent via `Idempotency-Key` header (Redis-backed, 24h TTL)
 - Per-service circuit breakers, timeouts, retry with exponential backoff + jitter, bulkhead semaphores
-- Images: reference original source URLs, do NOT rehost on S3 (copyright compliance)
+- Images: reference original source URLs, do NOT rehost on S3
 - PII stripped at extraction and output; data expires from ES after 24h via time-based indices
 - Cost tracking via Redis daily counters; request cancellation via `POST /api/search/{id}/cancel`
 - Frontend: React on S3 + CloudFront; API proxied through CloudFront → EC2 (no API Gateway, no Lambda)
@@ -18,48 +20,53 @@ Build an AI-powered accommodation discovery platform that crawls listings from t
 ## Progress
 ### Done
 - All planning documents created (`ideaAndplan/`): idea.md, architecture_decision.md, dev_plan.md, final_plan.md, tech_stack.md, low_level_design.md, aws_services.md
-- Stage 1 (Project Scaffold): FastAPI app factory, Settings/Pydantic config, docker-compose with ES+Redis+FastAPI, Makefile, health endpoint, error hierarchy, full directory structure matching LLD
-- Stage 2 (MCP Server): domain models (CrawledProperty, CrawlJob, SearchQuery), BaseTool ABC with ToolDependencies, ToolRegistry with `@tool` decorator, FastMCP server, 7 stub MCP tools, all `__init__.py` wired
-- Stage 3 (Web Tools with Resilience): CircuitBreaker (3-state), RetryWithBackoff (exponential + jitter), Timeout (asyncio.wait_for), Bulkhead (asyncio.Semaphore), Brave Search API client, FireCrawl API client, Bedrock client (Sonnet → Haiku fallback, Titan Embeddings v2, `extract_property` + `synthesize`), all wrapped with resilience stack (Bulkhead → CB → Retry → Timeout), wired into server lifespan
-- Stage 4 (Elasticsearch + Redis Persistence): `CrawledPropertyESRepository` with time-based indices (`properties-YYYY.MM.DD`), strict mapping (geo_point, dense_vector 1024d, hybrid multi-field search), `CacheRepository` (cosine similarity cache with optional auto-embedding), `JobRepository` (CrawlJob CRUD), `IdempotencyRepository` (SETNX acquire/release), all wired into ToolDependencies
-- Stage 5 (Agent Orchestrator + Guardrails + API): LangGraph agent (PLAN → EXECUTE → EVALUATE → SYNTHESIZE), `AgentState` TypedDict with `decision` routing, context injected via `RunnableConfig`, input guardrails (intent classifier, content filter, sliding window rate limiter), output guardrails (PII stripper for email/phone/SSN/CC, grounding checker), `POST /api/search` SSE streaming endpoint with idempotency + caching + job tracking, `GET /api/search/{id}`, `POST /api/search/{id}/cancel`
-- Stage 6 (React Frontend): Vite + React 18 + TypeScript strict + Tailwind CSS v4, chat-style UI with SSE streaming, cancel/clear buttons, Vite proxy to FastAPI backend
+- Stage 1–6 complete: FastAPI app, docker-compose (ES + Redis + SearXNG + Crawl4AI + API), MCP server with 7 tools plus Bedrock Nova Micro support, all infrastructure clients with resilience stack, Elasticsearch + Redis persistence, LangGraph agent (PLAN → EXECUTE → EVALUATE → SYNTHESIZE), guardrails, SSE streaming API, React frontend (Vite + Tailwind v4)
+- **Bedrock Nova Micro working end-to-end**: Full flow tested — SearXNG returns real URLs → Crawl4AI scrapes pages → Nova Micro extracts structured data via calls + synthesizes conversational response → SSE delivers answer. Found real properties (Krishan Kunj PG, 2 BHK in Mansarovar Extension). `"error": null`.
+- **Self-hosted search/scraping**: SearXNG (DuckDuckGo, Startpage, Wikipedia engines) replaces Brave Search. Crawl4AI replaces FireCrawl. Both configured in docker-compose, wired into tool dependencies.
+- **Heuristic property extractor**: Regex parser (prices in ₹/Rs/$/£/€, bedrooms 2BHK/Studio/Single, amenities AC/WiFi/Power Backup, titles, tags, location, images, rating) as permanent fallback when Bedrock unavailable.
+- **Static plan (no Bedrock planning)**: Plan node now hardcodes a 5-step plan (search_web count=8 → scrape 2 URLs → extract 2). Nova Micro outputs inconsistent plan format, so LLM planning is disabled.
+- **Multi-format Bedrock client**: Handles both Claude (anthropic_version) and Nova (messages.content[].text + inferenceConfig) formats. Handles both Titan (inputText) and Cohere (texts[] + input_type) embedding formats. Inference profile IDs (`us.amazon.nova-micro-v1:0`, `us.cohere.embed-v4:0`).
+- **AWS credentials**: Supports direct keys via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or profile via `AWS_PROFILE` with `~/.aws:/root/.aws:ro` mount. `aioboto3` dependency.
+- **86/86 tests passing**, 0 ruff errors, frontend builds with 0 TS errors.
 
 ### Next Steps
-1. Stage 7: Deploy to EC2 with docker-compose, configure CloudFront + Route53
+1. Submit Anthropic use case form in AWS Bedrock console to unblock Claude models (for better reasoning in extraction)
+2. Improve search result quality: SearXNG returns generic category pages, not individual listing URLs — refine query or post-filter
+3. Improve heuristic extractor for multi-listing category pages (split on listing boundaries)
+4. Stage 7: Deploy to EC2 with docker-compose, configure CloudFront + Route53
 
 ### Blocked
-- No production API keys configured: `BRAVE_API_KEY`, `FIRECRAWL_API_KEY` are empty in `.env`; all external clients fall through to stub/mock behavior gracefully
+- Claude models blocked — all Anthropic models fail with `ResourceNotFoundException: Model use case details have not been submitted`. User must fill out Anthropic use case form in AWS Bedrock console.
+- SearXNG shows `unhealthy` in Docker healthcheck (Google rate-limits), but returns results from DuckDuckGo, Startpage, Wikipedia.
 
 ## Key Decisions
-- LangGraph agent orchestrator with MCP tool layer: LangGraph manages state (plan → execute → evaluate → synthesize), MCP provides decoupled, pluggable tool definitions
-- FastMCP with SSE transport, embedded in same FastAPI process: single deployable, no separate MCP server process
-- All infrastructure clients wrapped with CircuitBreaker + Bulkhead + RetryWithBackoff + Timeout: one consistent failure pattern per external service
-- Fallback LLM chain: Claude Sonnet → Claude Haiku (Sonnet for reasoning, Haiku for cheaper fallback)
-- Time-based ES indices (`properties-YYYY.MM.DD`): simpler TTL enforcement than delete_by_query
-- Agent routing fixed by including `decision` in `AgentState` TypedDict — LangGraph silently dropped keys not in the schema, causing infinite loops
-- SSE streaming for POST /api/search: allows real-time progress updates while the agent runs; `Idempotency-Key` deduplication prevents duplicate processing
+- Self-hosted search/scraping by default: SearXNG + Crawl4AI replace Brave Search and FireCrawl
+- LangGraph agent with MCP tool layer; FastMCP with SSE transport embedded in same FastAPI process
+- All infrastructure clients wrapped with CircuitBreaker + Bulkhead + RetryWithBackoff + Timeout
+- **Nova Micro as primary LLM** ($0.035/1M tokens), Cohere Embed v4 for vectors. Both primary and fallback set to same Nova model to avoid Claude form error. Switch to Claude models once form is approved.
+- **Static plan** — Nova Micro generates unreliable plan format; plan_node uses hardcoded 5-step plan
+- Time-based ES indices (`properties-YYYY.MM.DD`) for TTL enforcement
+- SSE streaming for POST /api/search with Idempotency-Key deduplication
+- `step_vars` in AgentState stores named variables (`result_url_1`, `url_1`, `markdown_2`, `result_url_1_2`) for cross-step `$variable` resolution
+- Heuristic extraction as permanent fallback when Bedrock unavailable
 
 ## Branch Structure
 - `main` — Stage 1 scaffold
-- `stage/02-mcp-server` — Stage 2 (MCP domain models, tools, server)
-- `stage/03-web-tools` — Stage 3 (resilience, Brave, FireCrawl, Bedrock clients)
-- `stage/04-es-redis` — Stage 4 (ES + Redis persistence)
-- `stage/05-agent-orchestrator` — Stages 5 + 6 (agent, guardrails, search API, React frontend)
-
-Each branch is merged forward (e.g. `stage/03-web-tools` contains Stages 1–3).
+- `stage/05-agent-orchestrator` — Stages 1–6 plus self-hosted infra, heuristic fallbacks, Nova Micro support
 
 ## Relevant Code Locations
 - `src/agent/graph.py` — build_agent(), run_agent(), StateGraph with PLAN/EXECUTE/EVALUATE/SYNTHESIZE
 - `src/agent/state.py` — AgentState TypedDict
-- `src/agent/nodes/` — plan_node, execute_node, evaluate_node, synthesize_node
-- `src/guardrails/input/classifier.py` — intent classification + content filter
-- `src/guardrails/input/rate_limiter.py` — sliding window rate limiter
-- `src/guardrails/output/pii.py` — PII stripping
-- `src/guardrails/output/grounding.py` — grounding checker
-- `src/api/routes/search.py` — POST /api/search (SSE), GET /api/search/{id}, POST /api/search/{id}/cancel
-- `src/api/server.py` — FastAPI app factory, mounts MCP server, includes routers
-- `tests/test_agent_graph.py`, `tests/test_agent_nodes.py`, `tests/test_guardrails.py` — 87 tests total, all passing
-- `frontend/src/hooks/useSearch.ts` — SSE stream reader, cancel, idempotency key generation
-- `frontend/src/components/Chat.tsx` — Chat container, message list, input form, cancel/clear buttons
-- `frontend/vite.config.ts` — Vite dev server with `/api` proxy to `localhost:8000`
+- `src/agent/nodes/plan.py` — Static 5-step plan (no Bedrock)
+- `src/agent/nodes/execute.py` — Step execution, variable resolution ($markdown_N, $result_url_N)
+- `src/agent/nodes/synthesize.py` — synthesize_node with Bedrock + fallback formatting
+- `src/infrastructure/external/bedrock.py` — BedrockClient: Claude + Nova formats, Cohere embeddings, `_strip_code_blocks()`
+- `src/infrastructure/external/searxng.py` — SearXNG client (replaces Brave Search)
+- `src/infrastructure/external/crawl4ai.py` — Crawl4AI client (replaces FireCrawl)
+- `src/mcp/tools/extraction.py` — ExtractionTool with Bedrock + heuristic regex fallback
+- `src/mcp/tools/synthesize.py` — SynthesizeTool with Bedrock + fallback formatting
+- `src/api/server.py` — FastAPI app factory, mounts MCP server, AWS env vars
+- `src/api/routes/search.py` — SSE streaming endpoint
+- `tests/` — 86 tests, all passing
+- `frontend/` — React 18 + Tailwind v4 chat UI
+- `docker-compose.yml` — 5 services: elasticsearch, redis, searxng, crawl4ai, api (mounts `~/.aws:/root/.aws:ro`)

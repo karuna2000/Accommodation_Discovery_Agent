@@ -11,3 +11,4 @@ class AgentState(TypedDict):
     error: str | None
     iteration: int
     decision: str
+    step_vars: dict[str, Any]

@@ -27,11 +27,12 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
+    from src.infrastructure.resilience.bulkhead import Bulkhead
+    from src.infrastructure.resilience.circuit_breaker import CircuitBreaker
+
     brave_client = None
     if settings.brave_api_key:
         from src.infrastructure.external.brave import BraveClient
-        from src.infrastructure.resilience.bulkhead import Bulkhead
-        from src.infrastructure.resilience.circuit_breaker import CircuitBreaker
 
         brave_client = BraveClient(
             api_key=settings.brave_api_key,
@@ -43,6 +44,41 @@ async def lifespan(app: FastAPI):
             ),
             timeout=settings.brave_timeout,
         )
+
+    searxng_client = None
+    try:
+        from src.infrastructure.external.searxng import SearXNGClient
+
+        searxng_client = SearXNGClient(
+            base_url=f"http://{settings.searxng_host}:{settings.searxng_port}",
+            bulkhead=Bulkhead("searxng", settings.searxng_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "searxng",
+                settings.searxng_cb_failure_threshold,
+                settings.searxng_cb_recovery_timeout,
+            ),
+            timeout=settings.searxng_timeout,
+        )
+    except Exception:
+        pass
+
+    crawl4ai_client = None
+    try:
+        from src.infrastructure.external.crawl4ai import Crawl4AIClient
+
+        crawl4ai_client = Crawl4AIClient(
+            base_url=f"http://{settings.crawl4ai_host}:{settings.crawl4ai_port}",
+            api_token=settings.crawl4ai_api_token,
+            bulkhead=Bulkhead("crawl4ai", settings.crawl4ai_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "crawl4ai",
+                settings.crawl4ai_cb_failure_threshold,
+                settings.crawl4ai_cb_recovery_timeout,
+            ),
+            timeout=settings.crawl4ai_timeout,
+        )
+    except Exception:
+        pass
 
     firecrawl_client = None
     if settings.firecrawl_api_key:
@@ -60,11 +96,29 @@ async def lifespan(app: FastAPI):
         )
 
     bedrock_client = None
-    try:
+    has_aws_config = False
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        import os
+
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", settings.aws_access_key_id)
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", settings.aws_secret_access_key)
+        os.environ.setdefault("AWS_DEFAULT_REGION", settings.aws_region)
+        has_aws_config = True
+    elif settings.aws_profile:
+        import os
+
+        os.environ.setdefault("AWS_PROFILE", settings.aws_profile)
+        os.environ.setdefault("AWS_DEFAULT_REGION", settings.aws_region)
+        has_aws_config = True
+
+    if has_aws_config:
         from src.infrastructure.external.bedrock import BedrockClient
 
         bedrock_client = BedrockClient(
             aws_region=settings.aws_region,
+            primary_model=settings.bedrock_model_id,
+            fallback_model=settings.bedrock_fallback_model_id,
+            embedding_model=settings.bedrock_embedding_model_id,
             bulkhead=Bulkhead("bedrock", settings.bedrock_max_concurrent),
             circuit_breaker=CircuitBreaker(
                 "bedrock",
@@ -73,8 +127,6 @@ async def lifespan(app: FastAPI):
             ),
             timeout=settings.bedrock_timeout,
         )
-    except Exception:
-        pass
 
     from src.infrastructure.persistence.elasticsearch.repository import (
         CrawledPropertyESRepository,
@@ -91,6 +143,8 @@ async def lifespan(app: FastAPI):
     deps = ToolDependencies(
         brave_client=brave_client,
         firecrawl_client=firecrawl_client,
+        searxng_client=searxng_client,
+        crawl4ai_client=crawl4ai_client,
         bedrock_client=bedrock_client,
         search_repo=search_repo,
         cache_repo=cache_repo,

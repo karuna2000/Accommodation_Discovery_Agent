@@ -23,9 +23,16 @@ class BraveSearchTool(BaseTool):
     }
 
     async def run(self, query: str, count: int = 10) -> list[str]:
-        client = self._deps.brave_client
-        if client:
-            return await client.search(query, count=count)
+        searxng = self._deps.searxng_client
+        if searxng:
+            try:
+                return await searxng.search(query, count=count)
+            except Exception:
+                pass
+
+        brave = self._deps.brave_client
+        if brave:
+            return await brave.search(query, count=count)
 
         return [
             f"https://example.com/listings/apartment-{i}-near-{query.lower().replace(' ', '-')}"

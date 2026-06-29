@@ -1,6 +1,38 @@
 services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - SEARXNG_SECRET_KEY=change-me-in-prod
+      - SEARXNG_RATE_LIMIT=false
+      - SEARXNG_BASE_URL=http://localhost:8080
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    environment:
+      - CRAWL4AI_API_TOKEN=crawl4ai-local-token
+    ports:
+      - "11235:11235"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11235/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   elasticsearch:
-    image: elasticsearch:8.15.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -29,7 +61,10 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - ~/.aws:/root/.aws:ro
     environment:
+      - AWS_PROFILE=default
+      - AWS_REGION=us-east-1
       - ES_HOST=elasticsearch
       - REDIS_HOST=redis
     depends_on:
@@ -37,3 +72,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      searxng:
+        condition: service_started
+      crawl4ai:
+        condition: service_started

@@ -24,9 +24,9 @@ class TestParsePlanLine:
 
 
 class TestPlanNode:
-    async def test_generates_default_plan_without_bedrock(self):
+    async def test_generates_static_plan(self):
         state = {
-            "query": "studio near UCLA",
+            "query": "test query",
             "plan": "",
             "step_index": 0,
             "max_steps": 5,
@@ -38,34 +38,9 @@ class TestPlanNode:
         config = {"configurable": {"context": {"tool_schemas": [], "bedrock_client": None}}}
         result = await plan_node(state, config)
         assert "plan" in result
+        assert "search_web(query=\"test query\", count=8)" in result["plan"]
         assert result["step_index"] == 0
         assert result["iteration"] == 1
-
-    async def test_uses_bedrock_when_available(self):
-        mock_bedrock = AsyncMock()
-        mock_bedrock.invoke_with_fallback.return_value = "1. search_web(query=\"test\")"
-
-        state = {
-            "query": "test",
-            "plan": "",
-            "step_index": 0,
-            "max_steps": 5,
-            "results": [],
-            "synthesized_answer": None,
-            "error": None,
-            "iteration": 0,
-        }
-        config = {
-            "configurable": {
-                "context": {
-                    "tool_schemas": [{"name": "search_web", "description": "Search web"}],
-                    "bedrock_client": mock_bedrock,
-                }
-            }
-        }
-        result = await plan_node(state, config)
-        assert result["plan"] == "1. search_web(query=\"test\")"
-        mock_bedrock.invoke_with_fallback.assert_awaited_once()
 
 
 class TestExecuteNode:

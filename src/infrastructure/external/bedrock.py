@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 import aioboto3
@@ -16,7 +17,7 @@ EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0"
 SYSTEM_PROMPTS = {
     "extract": (
         "You are a property listing extractor. Extract structured data from the "
-        "listing text into JSON. Only return valid JSON, no preamble."
+        "listing text into JSON. Only return valid JSON, no preamble, no markdown."
     ),
     "synthesize": (
         "You are a helpful accommodation assistant. Given search results and a "
@@ -25,16 +26,28 @@ SYSTEM_PROMPTS = {
 }
 
 
+def _strip_code_blocks(text: str) -> str:
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = text.strip()
+    return text
+
+
 class BedrockClient:
     def __init__(
         self,
         aws_region: str = "us-east-1",
+        primary_model: str = "anthropic.claude-3-sonnet-20240229-v1:0",
+        fallback_model: str = "anthropic.claude-3-haiku-20240307-v1:0",
+        embedding_model: str = "amazon.titan-embed-text-v2:0",
         bulkhead: Bulkhead | None = None,
         circuit_breaker: CircuitBreaker | None = None,
         timeout: float = 30.0,
         retry_max: int = 2,
     ):
         self._region = aws_region
+        self._primary_model = primary_model
+        self._fallback_model = fallback_model
+        self._embedding_model = embedding_model
         self._timeout = timeout
         self._retry_max = retry_max
         self._bulkhead = bulkhead or Bulkhead("bedrock", max_concurrent=3)
@@ -61,9 +74,9 @@ class BedrockClient:
         max_tokens: int,
     ) -> str:
         try:
-            return await self._invoke_model(PRIMARY_MODEL, prompt, system, max_tokens)
+            return await self._invoke_model(self._primary_model, prompt, system, max_tokens)
         except Exception:
-            return await self._invoke_model(FALLBACK_MODEL, prompt, system, max_tokens)
+            return await self._invoke_model(self._fallback_model, prompt, system, max_tokens)
 
     async def _invoke_model(
         self,
@@ -106,13 +119,21 @@ class BedrockClient:
     ) -> str:
         session = aioboto3.Session()
         async with session.client("bedrock-runtime", region_name=self._region) as client:
-            body: dict[str, Any] = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            if system:
-                body["system"] = system
+            if "nova" in model_id.lower():
+                body: dict[str, Any] = {
+                    "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                    "inferenceConfig": {"max_new_tokens": max_tokens},
+                }
+                if system:
+                    body["system"] = [{"text": system}]
+            else:
+                body = {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if system:
+                    body["system"] = system
 
             response = await client.invoke_model(
                 modelId=model_id,
@@ -121,21 +142,26 @@ class BedrockClient:
                 body=json.dumps(body),
             )
             response_body = json.loads(await response["body"].read())
+
+            if "nova" in model_id.lower():
+                return response_body["output"]["message"]["content"][0]["text"]
             return response_body["content"][0]["text"]
 
     async def extract_property(self, markdown: str, url: str) -> CrawledProperty:
         prompt = (
             f"Extract property listing details from this page content. "
             f"Source URL: {url}\n\nContent:\n{markdown}\n\n"
-            "Return JSON with fields: title (str), description (str | null), "
+            "Return ONLY valid JSON with these fields: "
+            "title (str), description (str | null), "
             "price_monthly (float | null), bedrooms (int | null), "
             "bathrooms (int | null), address (str | null), "
             "latitude (float | null), longitude (float | null), "
             "images (list[str]), amenities (list[str]), tags (list[str]), "
             "reviews_summary (str | null).\n\n"
-            "Set fields to null if not found. Just return JSON."
+            "No explanation, no markdown, no code blocks — just the JSON object."
         )
         result = await self.invoke_with_fallback(prompt, system=SYSTEM_PROMPTS["extract"])
+        result = _strip_code_blocks(result)
         data = json.loads(result)
         loc = None
         if data.get("latitude") is not None or data.get("longitude") is not None or data.get("address"):
@@ -187,14 +213,19 @@ class BedrockClient:
     async def _send_embedding_request(self, text: str) -> list[float]:
         session = aioboto3.Session()
         async with session.client("bedrock-runtime", region_name=self._region) as client:
-            body = json.dumps({"inputText": text})
+            if "cohere" in self._embedding_model.lower():
+                body = json.dumps({"texts": [text], "input_type": "search_document"})
+            else:
+                body = json.dumps({"inputText": text})
             response = await client.invoke_model(
-                modelId=EMBEDDING_MODEL,
+                modelId=self._embedding_model,
                 contentType="application/json",
                 accept="application/json",
                 body=body,
             )
             response_body = json.loads(await response["body"].read())
+            if "cohere" in self._embedding_model.lower():
+                return response_body["embeddings"][0]
             return response_body["embedding"]
 
     @staticmethod

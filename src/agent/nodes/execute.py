@@ -4,6 +4,19 @@ from typing import Any
 from langgraph.types import RunnableConfig
 
 
+def _coerce(value: str) -> Any:
+    stripped = value.strip().strip('"').strip("'")
+    if stripped.isdigit():
+        return int(stripped)
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+    if stripped.lower() in ("true", "false"):
+        return stripped.lower() == "true"
+    return stripped
+
+
 def _parse_plan_line(line: str) -> tuple[str, dict[str, str]] | None:
     match = re.match(r"\d+\.\s*(\w+)\((.*)\)", line.strip())
     if not match:
@@ -22,6 +35,7 @@ async def execute_node(state: dict[str, Any], config: RunnableConfig) -> dict[st
     plan = state.get("plan", "")
     step_idx = state.get("step_index", 0)
     results = list(state.get("results", []))
+    step_vars = dict(state.get("step_vars", {}))
 
     lines = [ln for ln in plan.split("\n") if ln.strip()]
     if step_idx >= len(lines):
@@ -38,15 +52,31 @@ async def execute_node(state: dict[str, Any], config: RunnableConfig) -> dict[st
 
     resolved_args: dict[str, Any] = {}
     for k, v in raw_args.items():
-        if v.startswith("$"):
-            resolved_args[k] = ctx.get(v[1:], v)
+        if isinstance(v, str) and v.startswith("$"):
+            var_name = v[1:]
+            resolved_args[k] = step_vars.get(var_name, ctx.get(var_name, v))
         else:
-            resolved_args[k] = v
+            resolved_args[k] = _coerce(v) if isinstance(v, str) else v
 
     try:
         result = await tool.run(**resolved_args)
     except Exception as e:
         return {"step_index": step_idx + 1, "error": f"{tool_name} failed: {e}"}
+
+    step_num = step_idx + 1
+    if tool_name == "search_web":
+        if isinstance(result, list):
+            step_vars[f"result_url_{step_num}"] = result[0] if result else ""
+            step_vars[f"url_{step_num}"] = result[0] if result else ""
+            for i, url in enumerate(result):
+                step_vars[f"result_url_{step_num}_{i+1}"] = url
+    elif tool_name == "scrape_url":
+        if isinstance(result, str):
+            step_vars[f"markdown_{step_num}"] = result
+    elif tool_name == "extract_property":
+        if isinstance(result, dict):
+            results.append(result)
+        return {"step_index": step_idx + 1, "results": results, "step_vars": step_vars}
 
     if isinstance(result, list):
         results.extend(result)
@@ -55,4 +85,4 @@ async def execute_node(state: dict[str, Any], config: RunnableConfig) -> dict[st
     elif isinstance(result, str):
         results.append({"content": result, "source": tool_name})
 
-    return {"step_index": step_idx + 1, "results": results}
+    return {"step_index": step_idx + 1, "results": results, "step_vars": step_vars}

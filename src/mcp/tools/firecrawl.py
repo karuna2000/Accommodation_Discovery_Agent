@@ -18,9 +18,16 @@ class FirecrawlTool(BaseTool):
     }
 
     async def run(self, url: str) -> str:
-        client = self._deps.firecrawl_client
-        if client:
-            return await client.scrape(url)
+        crawl4ai = self._deps.crawl4ai_client
+        if crawl4ai:
+            try:
+                return await crawl4ai.scrape(url)
+            except Exception:
+                pass
+
+        firecrawl = self._deps.firecrawl_client
+        if firecrawl:
+            return await firecrawl.scrape(url)
 
         return f"""# Mock Listing from {url}
 
