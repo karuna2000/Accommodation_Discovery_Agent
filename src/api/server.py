@@ -8,6 +8,9 @@ from redis.asyncio import Redis
 from src.api.routes.health import router as health_router
 from src.common.errors import AppError
 from src.config.settings import Settings
+from src.mcp.registry import registry
+from src.mcp.server import create_mcp_server
+from src.mcp.tools.base import ToolDependencies
 
 
 @asynccontextmanager
@@ -23,8 +26,17 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
+    deps = ToolDependencies()
+    tools = registry.create_all(deps)
+    deps.tools = tools
+
+    mcp_server = create_mcp_server(tools)
+
     app.state.es = es
     app.state.redis = redis
+    app.state.deps = deps
+    app.state.tools = tools
+    app.state.mcp = mcp_server
 
     yield
 
