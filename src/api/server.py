@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from src.api.routes.health import router as health_router
+from src.api.routes.search import router as search_router
 from src.common.errors import AppError
 from src.config.settings import Settings
 from src.mcp.registry import registry
@@ -126,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     app.include_router(health_router)
+    app.include_router(search_router)
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError):
