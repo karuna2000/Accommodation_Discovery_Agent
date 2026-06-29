@@ -23,10 +23,10 @@ Build an AI-powered accommodation discovery platform that crawls listings from t
 - Stage 3 (Web Tools with Resilience): CircuitBreaker (3-state), RetryWithBackoff (exponential + jitter), Timeout (asyncio.wait_for), Bulkhead (asyncio.Semaphore), Brave Search API client, FireCrawl API client, Bedrock client (Sonnet → Haiku fallback, Titan Embeddings v2, `extract_property` + `synthesize`), all wrapped with resilience stack (Bulkhead → CB → Retry → Timeout), wired into server lifespan
 - Stage 4 (Elasticsearch + Redis Persistence): `CrawledPropertyESRepository` with time-based indices (`properties-YYYY.MM.DD`), strict mapping (geo_point, dense_vector 1024d, hybrid multi-field search), `CacheRepository` (cosine similarity cache with optional auto-embedding), `JobRepository` (CrawlJob CRUD), `IdempotencyRepository` (SETNX acquire/release), all wired into ToolDependencies
 - Stage 5 (Agent Orchestrator + Guardrails + API): LangGraph agent (PLAN → EXECUTE → EVALUATE → SYNTHESIZE), `AgentState` TypedDict with `decision` routing, context injected via `RunnableConfig`, input guardrails (intent classifier, content filter, sliding window rate limiter), output guardrails (PII stripper for email/phone/SSN/CC, grounding checker), `POST /api/search` SSE streaming endpoint with idempotency + caching + job tracking, `GET /api/search/{id}`, `POST /api/search/{id}/cancel`
+- Stage 6 (React Frontend): Vite + React 18 + TypeScript strict + Tailwind CSS v4, chat-style UI with SSE streaming, cancel/clear buttons, Vite proxy to FastAPI backend
 
 ### Next Steps
-1. Stage 6: React frontend (Vite + TypeScript + Tailwind) with SSE streaming UI
-2. Stage 7: Deploy to EC2 with docker-compose, configure CloudFront + Route53
+1. Stage 7: Deploy to EC2 with docker-compose, configure CloudFront + Route53
 
 ### Blocked
 - No production API keys configured: `BRAVE_API_KEY`, `FIRECRAWL_API_KEY` are empty in `.env`; all external clients fall through to stub/mock behavior gracefully
@@ -45,7 +45,7 @@ Build an AI-powered accommodation discovery platform that crawls listings from t
 - `stage/02-mcp-server` — Stage 2 (MCP domain models, tools, server)
 - `stage/03-web-tools` — Stage 3 (resilience, Brave, FireCrawl, Bedrock clients)
 - `stage/04-es-redis` — Stage 4 (ES + Redis persistence)
-- `stage/05-agent-orchestrator` — Stage 5 (agent, guardrails, search API)
+- `stage/05-agent-orchestrator` — Stages 5 + 6 (agent, guardrails, search API, React frontend)
 
 Each branch is merged forward (e.g. `stage/03-web-tools` contains Stages 1–3).
 
@@ -60,3 +60,6 @@ Each branch is merged forward (e.g. `stage/03-web-tools` contains Stages 1–3).
 - `src/api/routes/search.py` — POST /api/search (SSE), GET /api/search/{id}, POST /api/search/{id}/cancel
 - `src/api/server.py` — FastAPI app factory, mounts MCP server, includes routers
 - `tests/test_agent_graph.py`, `tests/test_agent_nodes.py`, `tests/test_guardrails.py` — 87 tests total, all passing
+- `frontend/src/hooks/useSearch.ts` — SSE stream reader, cancel, idempotency key generation
+- `frontend/src/components/Chat.tsx` — Chat container, message list, input form, cancel/clear buttons
+- `frontend/vite.config.ts` — Vite dev server with `/api` proxy to `localhost:8000`
