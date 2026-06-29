@@ -26,7 +26,60 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
-    deps = ToolDependencies()
+    brave_client = None
+    if settings.brave_api_key:
+        from src.infrastructure.external.brave import BraveClient
+        from src.infrastructure.resilience.bulkhead import Bulkhead
+        from src.infrastructure.resilience.circuit_breaker import CircuitBreaker
+
+        brave_client = BraveClient(
+            api_key=settings.brave_api_key,
+            bulkhead=Bulkhead("brave", settings.brave_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "brave",
+                settings.brave_cb_failure_threshold,
+                settings.brave_cb_recovery_timeout,
+            ),
+            timeout=settings.brave_timeout,
+        )
+
+    firecrawl_client = None
+    if settings.firecrawl_api_key:
+        from src.infrastructure.external.firecrawl import FirecrawlClient
+
+        firecrawl_client = FirecrawlClient(
+            api_key=settings.firecrawl_api_key,
+            bulkhead=Bulkhead("firecrawl", settings.firecrawl_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "firecrawl",
+                settings.firecrawl_cb_failure_threshold,
+                settings.firecrawl_cb_recovery_timeout,
+            ),
+            timeout=settings.firecrawl_timeout,
+        )
+
+    bedrock_client = None
+    try:
+        from src.infrastructure.external.bedrock import BedrockClient
+
+        bedrock_client = BedrockClient(
+            aws_region=settings.aws_region,
+            bulkhead=Bulkhead("bedrock", settings.bedrock_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "bedrock",
+                settings.bedrock_cb_failure_threshold,
+                settings.bedrock_cb_recovery_timeout,
+            ),
+            timeout=settings.bedrock_timeout,
+        )
+    except Exception:
+        pass
+
+    deps = ToolDependencies(
+        brave_client=brave_client,
+        firecrawl_client=firecrawl_client,
+        bedrock_client=bedrock_client,
+    )
     tools = registry.create_all(deps)
     deps.tools = tools
 
