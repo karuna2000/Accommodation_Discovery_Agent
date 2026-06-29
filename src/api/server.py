@@ -6,8 +6,12 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from src.api.routes.health import router as health_router
+from src.api.routes.search import router as search_router
 from src.common.errors import AppError
 from src.config.settings import Settings
+from src.mcp.registry import registry
+from src.mcp.server import create_mcp_server
+from src.mcp.tools.base import ToolDependencies
 
 
 @asynccontextmanager
@@ -23,8 +27,140 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
+    from src.infrastructure.resilience.bulkhead import Bulkhead
+    from src.infrastructure.resilience.circuit_breaker import CircuitBreaker
+
+    brave_client = None
+    if settings.brave_api_key:
+        from src.infrastructure.external.brave import BraveClient
+
+        brave_client = BraveClient(
+            api_key=settings.brave_api_key,
+            bulkhead=Bulkhead("brave", settings.brave_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "brave",
+                settings.brave_cb_failure_threshold,
+                settings.brave_cb_recovery_timeout,
+            ),
+            timeout=settings.brave_timeout,
+        )
+
+    searxng_client = None
+    try:
+        from src.infrastructure.external.searxng import SearXNGClient
+
+        searxng_client = SearXNGClient(
+            base_url=f"http://{settings.searxng_host}:{settings.searxng_port}",
+            bulkhead=Bulkhead("searxng", settings.searxng_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "searxng",
+                settings.searxng_cb_failure_threshold,
+                settings.searxng_cb_recovery_timeout,
+            ),
+            timeout=settings.searxng_timeout,
+        )
+    except Exception:
+        pass
+
+    crawl4ai_client = None
+    try:
+        from src.infrastructure.external.crawl4ai import Crawl4AIClient
+
+        crawl4ai_client = Crawl4AIClient(
+            base_url=f"http://{settings.crawl4ai_host}:{settings.crawl4ai_port}",
+            api_token=settings.crawl4ai_api_token,
+            bulkhead=Bulkhead("crawl4ai", settings.crawl4ai_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "crawl4ai",
+                settings.crawl4ai_cb_failure_threshold,
+                settings.crawl4ai_cb_recovery_timeout,
+            ),
+            timeout=settings.crawl4ai_timeout,
+        )
+    except Exception:
+        pass
+
+    firecrawl_client = None
+    if settings.firecrawl_api_key:
+        from src.infrastructure.external.firecrawl import FirecrawlClient
+
+        firecrawl_client = FirecrawlClient(
+            api_key=settings.firecrawl_api_key,
+            bulkhead=Bulkhead("firecrawl", settings.firecrawl_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "firecrawl",
+                settings.firecrawl_cb_failure_threshold,
+                settings.firecrawl_cb_recovery_timeout,
+            ),
+            timeout=settings.firecrawl_timeout,
+        )
+
+    bedrock_client = None
+    has_aws_config = False
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        import os
+
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", settings.aws_access_key_id)
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", settings.aws_secret_access_key)
+        os.environ.setdefault("AWS_DEFAULT_REGION", settings.aws_region)
+        has_aws_config = True
+    elif settings.aws_profile:
+        import os
+
+        os.environ.setdefault("AWS_PROFILE", settings.aws_profile)
+        os.environ.setdefault("AWS_DEFAULT_REGION", settings.aws_region)
+        has_aws_config = True
+
+    if has_aws_config:
+        from src.infrastructure.external.bedrock import BedrockClient
+
+        bedrock_client = BedrockClient(
+            aws_region=settings.aws_region,
+            primary_model=settings.bedrock_model_id,
+            fallback_model=settings.bedrock_fallback_model_id,
+            embedding_model=settings.bedrock_embedding_model_id,
+            bulkhead=Bulkhead("bedrock", settings.bedrock_max_concurrent),
+            circuit_breaker=CircuitBreaker(
+                "bedrock",
+                settings.bedrock_cb_failure_threshold,
+                settings.bedrock_cb_recovery_timeout,
+            ),
+            timeout=settings.bedrock_timeout,
+        )
+
+    from src.infrastructure.persistence.elasticsearch.repository import (
+        CrawledPropertyESRepository,
+    )
+    from src.infrastructure.persistence.redis.cache import CacheRepository
+    from src.infrastructure.persistence.redis.job_repo import JobRepository
+    from src.infrastructure.persistence.redis.idempotency import IdempotencyRepository
+
+    search_repo = CrawledPropertyESRepository(es, settings.es_index_prefix)
+    cache_repo = CacheRepository(redis, bedrock_client, settings.redis_cache_ttl)
+    job_repo = JobRepository(redis)
+    idem_repo = IdempotencyRepository(redis, settings.idempotency_ttl)
+
+    deps = ToolDependencies(
+        brave_client=brave_client,
+        firecrawl_client=firecrawl_client,
+        searxng_client=searxng_client,
+        crawl4ai_client=crawl4ai_client,
+        bedrock_client=bedrock_client,
+        search_repo=search_repo,
+        cache_repo=cache_repo,
+        job_repo=job_repo,
+        idem_repo=idem_repo,
+    )
+    tools = registry.create_all(deps)
+    deps.tools = tools
+
+    mcp_server = create_mcp_server(tools)
+
     app.state.es = es
     app.state.redis = redis
+    app.state.deps = deps
+    app.state.tools = tools
+    app.state.mcp = mcp_server
 
     yield
 
@@ -45,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     app.include_router(health_router)
+    app.include_router(search_router)
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError):

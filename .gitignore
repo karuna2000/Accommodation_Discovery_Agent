@@ -13,3 +13,14 @@ docker-compose.override.yml
 *.log
 .idea/
 .vscode/
+node_modules/
+*.tsbuildinfo
+
+# Planning docs — stale reference material, not needed to build/run
+ideaAndplan/
+
+# Working notes — project-specific agent instructions
+AGENTS.md
+
+# SearXNG generated config (contains secret_key)
+searxng/

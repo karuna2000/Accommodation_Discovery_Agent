@@ -43,6 +43,14 @@ class ToolExecutionError(AppError):
         )
 
 
+class NonRetryableError(ServiceError):
+    def __init__(self, service: str, reason: str):
+        super().__init__(
+            f"Non-retryable error from {service}: {reason}",
+            "NON_RETRYABLE", 400,
+        )
+
+
 class IdempotencyKeyReplayedError(AppError):
     def __init__(self, key: str):
         super().__init__(
