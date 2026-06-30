@@ -22,7 +22,7 @@ class BraveSearchTool(BaseTool):
         "required": ["query"],
     }
 
-    async def run(self, query: str, count: int = 10) -> list[str]:
+    async def run(self, query: str, count: int = 10) -> list[dict[str, str]]:
         searxng = self._deps.searxng_client
         if searxng:
             try:
@@ -32,9 +32,17 @@ class BraveSearchTool(BaseTool):
 
         brave = self._deps.brave_client
         if brave:
-            return await brave.search(query, count=count)
+            urls = await brave.search(query, count=count)
+            return [{"url": u, "title": "", "snippet": "", "engine": "brave", "domain_trust_score": 0, "page_type": "unknown"} for u in urls]
 
         return [
-            f"https://example.com/listings/apartment-{i}-near-{query.lower().replace(' ', '-')}"
+            {
+                "url": f"https://example.com/listings/apartment-{i}-near-{query.lower().replace(' ', '-')}",
+                "title": f"Apartment {i} near {query}",
+                "snippet": f"Listing {i} description",
+                "engine": "mock",
+                "domain_trust_score": 2,
+                "page_type": "listing",
+            }
             for i in range(count)
         ]

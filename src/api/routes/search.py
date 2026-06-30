@@ -10,7 +10,6 @@ from src.common.errors import IdempotencyKeyReplayedError, QueryBlockedError, Ra
 from src.domain.models.job import CrawlJob, JobStatus
 from src.guardrails.input.classifier import validate_input
 from src.guardrails.input.rate_limiter import SlidingWindowRateLimiter
-from src.guardrails.output.grounding import check_grounding
 from src.guardrails.output.pii import strip_pii
 
 router = APIRouter(tags=["search"])
@@ -19,7 +18,7 @@ _rate_limiter = SlidingWindowRateLimiter()
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(min_length=3, max_length=500)
+    query: str = Field(min_length=1, max_length=500)
     max_iterations: int = Field(default=5, ge=1, le=20)
     location_hint: str | None = None
 
@@ -45,15 +44,17 @@ async def search(
     if not _rate_limiter.is_allowed(ip):
         raise RateLimitError()
 
-    blocked_reason = validate_input(body.query)
+    sanitized_query, blocked_reason = validate_input(body.query)
     if blocked_reason:
         raise QueryBlockedError(blocked_reason)
+
+    query = sanitized_query or body.query
 
     if idempotency_key and deps.idem_repo:
         if not await deps.idem_repo.try_acquire(idempotency_key):
             status = await deps.idem_repo.get_status(idempotency_key)
             if status and status.startswith("completed:"):
-                cached = await deps.cache_repo.get_similar(body.query) if deps.cache_repo else None
+                cached = await deps.cache_repo.get_similar(query) if deps.cache_repo else None
                 if cached:
                     return SearchStatusResponse(
                         search_id=idempotency_key,
@@ -63,7 +64,7 @@ async def search(
             raise IdempotencyKeyReplayedError(idempotency_key)
 
     search_id = idempotency_key or str(uuid4())
-    job = CrawlJob(search_id=search_id, query=body.query)
+    job = CrawlJob(search_id=search_id, query=query)
     if deps.job_repo:
         await deps.job_repo.create(job)
 
@@ -80,13 +81,13 @@ async def search(
     async def event_stream():
         final_answer = "I couldn't find any results."
         final_error = None
-        final_results: list[dict] = []
 
         async for event in run_agent(
-            query=body.query,
+            query=query,
             tools=tools,
             tool_schemas=tool_schemas,
             bedrock_client=bedrock_client,
+            search_repo=deps.search_repo,
             max_iterations=body.max_iterations,
         ):
             yield f"data: {json.dumps({'type': 'event', 'data': event})}\n\n"
@@ -97,25 +98,19 @@ async def search(
                         final_answer = node_data["synthesized_answer"]
                     if node_data.get("error"):
                         final_error = node_data["error"]
-                    if node_data.get("results"):
-                        final_results = node_data["results"]
 
         if deps.job_repo:
-            grounded = True
-            grounding_issues: list[str] = []
-            if final_answer and final_results:
-                grounded, grounding_issues = check_grounding(final_answer, final_results)
             await deps.job_repo.update(
                 search_id,
-                status=JobStatus.COMPLETE if grounded else JobStatus.ERROR,
-                error=final_error or ("; ".join(grounding_issues) if grounding_issues else None),
+                status=JobStatus.COMPLETE if not final_error else JobStatus.ERROR,
+                error=final_error,
             )
 
         final_answer = strip_pii(final_answer)
 
         if deps.cache_repo:
             await deps.cache_repo.store(
-                query=body.query,
+                query=query,
                 embedding=None,
                 response=final_answer,
             )
