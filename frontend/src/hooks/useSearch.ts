@@ -10,6 +10,8 @@ interface UseSearchReturn {
   submitQuery: (query: string) => Promise<void>;
   cancelSearch: () => Promise<void>;
   clearMessages: () => void;
+  searchStartedAt: number | null;
+  searchCompletedAt: number | null;
 }
 
 function genId(): string {
@@ -87,8 +89,11 @@ export function useSearch(): UseSearchReturn {
   const [isStreaming, setIsStreaming] = useState(false);
   const [searchId, setSearchId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
+  const [searchCompletedAt, setSearchCompletedAt] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const planLinesRef = useRef<string[]>([]);
+  const timingRef = useRef<{ started: boolean }>({ started: false });
 
   const submitQuery = useCallback(async (query: string) => {
     const abort = new AbortController();
@@ -96,6 +101,9 @@ export function useSearch(): UseSearchReturn {
     setIsStreaming(true);
     setError(null);
     setSteps([]);
+    setSearchStartedAt(null);
+    setSearchCompletedAt(null);
+    timingRef.current = { started: false };
     planLinesRef.current = [];
 
     const userMsg: ChatMessage = {
@@ -160,6 +168,7 @@ export function useSearch(): UseSearchReturn {
 
           if (parsed.type === "done") {
             setSearchId(parsed.search_id);
+            setSearchCompletedAt(Date.now());
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -180,6 +189,10 @@ export function useSearch(): UseSearchReturn {
             const synthesizeEvent = event.synthesize;
 
             if (planEvent) {
+              if (!timingRef.current.started) {
+                timingRef.current.started = true;
+                setSearchStartedAt(Date.now());
+              }
               planLinesRef.current = parsePlanLines(planEvent.plan);
               const step: StepInfo = {
                 id: genId(),
@@ -188,6 +201,7 @@ export function useSearch(): UseSearchReturn {
                 summary: `${planLinesRef.current.length} steps planned`,
                 detail: planEvent.plan,
                 status: "done",
+                startedAt: Date.now(),
               };
               setSteps((prev) => [...prev, step]);
             }
@@ -247,6 +261,7 @@ export function useSearch(): UseSearchReturn {
                 status: isError ? "error" : "done",
                 results,
                 toolName,
+                startedAt: Date.now(),
               };
 
               setSteps((prev) => [...prev, step]);
@@ -260,6 +275,7 @@ export function useSearch(): UseSearchReturn {
                 summary: `Decision: ${evaluateEvent.decision}`,
                 detail: `Routing decision: **${evaluateEvent.decision}**`,
                 status: "done",
+                startedAt: Date.now(),
               };
               setSteps((prev) => [...prev, step]);
             }
@@ -272,6 +288,7 @@ export function useSearch(): UseSearchReturn {
                 summary: "Done",
                 detail: "",
                 status: "done",
+                startedAt: Date.now(),
               };
               setSteps((prev) => [...prev, step]);
               setMessages((prev) => {
@@ -306,6 +323,7 @@ export function useSearch(): UseSearchReturn {
             summary: "Search was cancelled by user.",
             detail: "",
             status: "done",
+            startedAt: Date.now(),
           },
         ]);
       } else {
@@ -320,6 +338,7 @@ export function useSearch(): UseSearchReturn {
             summary: msg,
             detail: msg,
             status: "error",
+            startedAt: Date.now(),
           },
         ]);
       }
@@ -345,6 +364,9 @@ export function useSearch(): UseSearchReturn {
     setSteps([]);
     setSearchId(null);
     setError(null);
+    setSearchStartedAt(null);
+    setSearchCompletedAt(null);
+    timingRef.current = { started: false };
   }, []);
 
   return {
@@ -356,5 +378,7 @@ export function useSearch(): UseSearchReturn {
     submitQuery,
     cancelSearch,
     clearMessages,
+    searchStartedAt,
+    searchCompletedAt,
   };
 }

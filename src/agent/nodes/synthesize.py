@@ -6,7 +6,12 @@ from src.mcp.tools.synthesize import _fmt_property
 
 
 async def synthesize_node(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    if state.get("needs_clarification"):
+        msg = state.get("clarification_message") or "Please provide more details."
+        return {"synthesized_answer": msg}
+
     query = state.get("query", "")
+    intent = state.get("intent", {})
     results = state.get("results", [])
     ctx = config.get("configurable", {}).get("context", {})
     bedrock = ctx.get("bedrock_client")
@@ -15,7 +20,7 @@ async def synthesize_node(state: dict[str, Any], config: RunnableConfig) -> dict
     synth_tool = tools.get("synthesize_answer")
     if synth_tool:
         try:
-            answer = await synth_tool.run(properties=results, query=query)
+            answer = await synth_tool.run(properties=results, query=query, intent=intent)
             return {"synthesized_answer": answer}
         except Exception:
             pass
@@ -45,7 +50,10 @@ async def synthesize_node(state: dict[str, Any], config: RunnableConfig) -> dict
 
     lines = [f"Here are {len(props)} properties matching '{query}':", ""]
     for p in props:
-        lines.append(_fmt_property(p))
+        lines.append(_fmt_property(p, intent))
         lines.append("")
 
-    return {"synthesized_answer": "\n".join(lines).strip()}
+    result = "\n".join(lines).strip()
+    if not result or len(result) < 20:
+        result = f"I searched for '{query}' but couldn't find matching properties. Try different criteria."
+    return {"synthesized_answer": result}

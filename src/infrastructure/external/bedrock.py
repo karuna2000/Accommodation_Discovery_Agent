@@ -147,6 +147,29 @@ class BedrockClient:
                 return response_body["output"]["message"]["content"][0]["text"]
             return response_body["content"][0]["text"]
 
+    async def analyze_intent(self, query: str) -> dict[str, Any]:
+        prompt = (
+            "You are an accommodation search intent analyzer. Extract the user's "
+            "requirements as JSON with these exact fields:\n"
+            "- budget_min: number or null (minimum budget if mentioned)\n"
+            "- budget_max: number or null (maximum budget, \"under X\" -> max)\n"
+            "- bedrooms: number or null (minimum bedrooms, e.g. 2 for \"2 BHK\")\n"
+            "- property_type: string or null (\"PG\", \"apartment\", \"flat\", \"studio\", "
+            "\"house\", \"hostel\", or null)\n"
+            "- location: string or null (area, city, neighborhood)\n"
+            "- gender_preference: string or null (\"boys\", \"girls\", or null)\n"
+            "- requirements: list of strings (amenities wanted: AC, WiFi, parking, etc.)\n"
+            "- keywords: list of strings (important search terms from the query)\n\n"
+            f"User query: {query}\n\n"
+            "Return ONLY valid JSON. No explanation, no markdown, no code blocks."
+        )
+        try:
+            result = await self.invoke_with_fallback(prompt, max_tokens=512)
+            result = _strip_code_blocks(result)
+            return json.loads(result)
+        except Exception:
+            return {}
+
     async def extract_property(self, markdown: str, url: str) -> CrawledProperty:
         prompt = (
             f"Extract property listing details from this page content. "
@@ -157,7 +180,11 @@ class BedrockClient:
             "bathrooms (int | null), address (str | null), "
             "latitude (float | null), longitude (float | null), "
             "images (list[str]), amenities (list[str]), tags (list[str]), "
-            "reviews_summary (str | null).\n\n"
+            "reviews_summary (str | null), "
+            "deposit (float | null), lease_term (str | null), "
+            "availability_date (str | null), house_rules (list[str]), "
+            "maintenance (float | null), furnishing_status (str | null), "
+            "food_included (bool | null).\n\n"
             "No explanation, no markdown, no code blocks — just the JSON object."
         )
         result = await self.invoke_with_fallback(prompt, system=SYSTEM_PROMPTS["extract"])
@@ -184,15 +211,24 @@ class BedrockClient:
             tags=data.get("tags", []),
             images=data.get("images", []),
             reviews_summary=data.get("reviews_summary"),
+            deposit=data.get("deposit"),
+            lease_term=data.get("lease_term"),
+            availability_date=data.get("availability_date"),
+            house_rules=data.get("house_rules", []),
+            maintenance=data.get("maintenance"),
+            furnishing_status=data.get("furnishing_status"),
+            food_included=data.get("food_included"),
         )
 
     async def synthesize(self, properties: list[dict], query: str) -> str:
         prompt = (
             f"User searched for: {query}\n\n"
-            f"Found {len(properties)} listings:\n{json.dumps(properties, indent=2)}\n\n"
+            f"Found {len(properties)} listings:\n{json.dumps(properties, indent=2, default=str)}\n\n"
             "Write a brief, conversational response summarizing the available "
             "listings for the user. Mention key details like prices, locations, "
-            "and amenities. If no properties found, say so helpfully."
+            "and amenities. For each listing, explain WHY it matches the user's "
+            "search query (e.g. 'under budget', 'correct bedrooms', 'in requested area'). "
+            "If no properties found, say so helpfully."
         )
         return await self.invoke_with_fallback(prompt, system=SYSTEM_PROMPTS["synthesize"])
 

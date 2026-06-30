@@ -37,6 +37,7 @@ export interface StepInfo {
   status: "running" | "done" | "error";
   results?: Record<string, unknown>[];
   toolName?: string;
+  startedAt: number;
 }
 
 export interface ChatMessage {

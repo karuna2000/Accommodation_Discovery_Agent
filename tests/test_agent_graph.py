@@ -14,10 +14,22 @@ class TestBuildAgent:
 
 class TestRunAgent:
     async def test_runs_with_mock_tools(self):
-        mock_tool = MagicMock()
-        mock_tool.run = AsyncMock(return_value=[{"title": "Mock Apt", "price_monthly": 1200}])
+        mock_search = MagicMock()
+        mock_search.run = AsyncMock(return_value=[
+            {"url": "https://example.com/1", "title": "Mock Apt", "snippet": "", "engine": "mock"},
+        ])
+        mock_scrape = MagicMock()
+        mock_scrape.run = AsyncMock(return_value="# Property\n**Price:** $1200")
+        mock_extract = MagicMock()
+        mock_extract.run = AsyncMock(return_value=[
+            {"title": "Mock Apt", "price_monthly": 1200, "source_url": "https://example.com/1"},
+        ])
 
-        tools = {"search_web": mock_tool}
+        tools = {
+            "search_web": mock_search,
+            "scrape_url": mock_scrape,
+            "extract_property": mock_extract,
+        }
         schemas = [{"name": "search_web", "description": "Search web"}]
 
         results = []
@@ -26,11 +38,11 @@ class TestRunAgent:
             tools=tools,
             tool_schemas=schemas,
             max_iterations=2,
-            max_steps=3,
+            max_steps=4,
         ):
             results.append(event)
 
-        assert len(results) >= 3  # plan, execute, evaluate, synthesize
+        assert len(results) >= 3
 
         final = results[-1]
         for node_name, node_data in final.items():
