@@ -24,3 +24,7 @@ AGENTS.md
 
 # SearXNG generated config (contains secret_key)
 searxng/
+
+*/.vite
+*/FLOW.md
+*/PRODUCT_UX.MD

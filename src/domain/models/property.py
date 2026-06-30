@@ -24,6 +24,13 @@ class CrawledProperty(BaseModel):
     tags: list[str] = []
     images: list[str] = []
     reviews_summary: str | None = None
+    deposit: float | None = None
+    lease_term: str | None = None
+    availability_date: str | None = None
+    house_rules: list[str] = []
+    maintenance: float | None = None
+    furnishing_status: str | None = None
+    food_included: bool | None = None
     embedding: list[float] | None = None
     crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     confidence: float = 0.5

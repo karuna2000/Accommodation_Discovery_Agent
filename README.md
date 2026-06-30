@@ -324,44 +324,104 @@ Target: single EC2 t3.micro with Docker Compose. Frontend on S3 + CloudFront, AP
 
 ## Architecture Decisions
 
+Each decision below explains **why** it was chosen (the problem it solves) and **how** it is implemented.
+
 ### Self-hosted by default
-Brave Search and FireCrawl APIs exist as optional backends, but the default is self-hosted SearXNG for meta-search and Crawl4AI for web scraping. This removes all third-party API dependencies and keeps the system fully contained in `docker-compose up`.
+
+**Why:** Third-party search and scraping APIs (Brave Search, FireCrawl, SerpAPI) introduce recurring costs, rate limits, and external dependencies. A self-contained system that runs entirely with `docker-compose up` eliminates API keys, usage quotas, and network dependency on external providers.
+
+**How:** SearXNG handles meta-search by aggregating DuckDuckGo, Startpage, and Wikipedia results via a single JSON API endpoint (`/search?format=json&q=...`). Crawl4AI runs a headless browser in a separate container, exposing a REST API (`http://crawl4ai:11235/crawl?url=...`) for page scraping. Both services are configured in `docker-compose.yml` and wired into the MCP tool layer as the default backends. The legacy Brave Search and FireCrawl clients remain in the codebase as optional fallbacks activated by setting `USE_BRAVE=1` or `USE_FIRECRAWL=1`.
 
 ### Single EC2 for everything
-All services (FastAPI, ES, Redis, SearXNG, Crawl4AI) run on one EC2 t3.micro via Docker Compose. Simplest deployment, free tier eligible. Single point of failure is acceptable for a POC.
+
+**Why:** A POC does not justify multi-service orchestration (ECS, Kubernetes, Lambda). Collocating all services on one machine eliminates network overhead between services, simplifies deployment to a single `docker compose up`, and keeps the infrastructure free-tier eligible.
+
+**How:** Five Docker containers (FastAPI, Elasticsearch 8.x, Redis 7, SearXNG, Crawl4AI) share a `t3.micro` instance via a Docker bridge network. Service discovery uses container hostnames (e.g., `http://elasticsearch:9200`). Resource contention is managed by Docker's built-in CPU/memory limits set in `docker-compose.yml`. Single-point-of-failure risk is accepted — the system is designed for evaluation, not production SLAs.
 
 ### ES as only data store, not DynamoDB
-No owner data to persist long-term. All crawled data is temporary (24h TTL via time-based indices `properties-YYYY.MM.DD`). ES handles search + storage + TTL in one place.
+
+**Why:** Accommodation listings are unstructured, short-lived (24h TTL), and need full-text search. DynamoDB adds secondary-index complexity for text search, requires managing a second storage system, and incurs per-request costs. Elasticsearch provides indexing, search, and storage in one system.
+
+**How:** Daily time-based indices (`properties-YYYY.MM.DD`) partition data by ingestion date. The `repository.py` layer abstracts CRUD operations behind a `PropertyRepository` interface. TTL is enforced at the index level — a daily cron task or Elasticsearch ILM policy drops indices older than 1 day, which is exponentially cheaper and faster than `_delete_by_query` on individual documents.
 
 ### No DynamoDB, no API Gateway, no Lambda
-Removed in v2. The stack is intentionally flat — one process, one machine, no serverless orchestration.
+
+**Why:** Serverless services add cold starts, IAM complexity, debugging difficulty, and cost unpredictability. A single FastAPI process with middleware handles routing, auth, rate limiting, and request validation — no API Gateway needed.
+
+**How:** The entire API surface is a single FastAPI `FastAPI()` instance mounted on a root scope. AWS credentials are passed via environment variables or `~/.aws:/root/.aws:ro` volume mount. There is no Lambda handler, no API Gateway REST/V2 integration, and no SAM/CDK template. The deployment is pure Docker Compose.
 
 ### Static plan, not LLM-generated
-Nova Micro outputs inconsistent plan format, so the plan node uses a hardcoded 5-step sequence (search → scrape ×2 → extract ×2). The evaluate node decides whether to loop back or synthesize.
+
+**Why:** Amazon Nova Micro produces inconsistent JSON plan formats, making it unreliable as a planner. A hardcoded plan eliminates format-parsing errors, reduces latency (no LLM call for planning), and keeps the agent deterministic.
+
+**How:** `plan.py` returns a fixed graph of 5 steps: `[search_web(count=8), scrape_url(index=0), scrape_url(index=1), extract_property(index=0), extract_property(index=1)]`. The `EVALUATE` node (`evaluate.py`) checks whether scraped URLs remain; if unprocessed results exist, it loops back to `EXECUTE`; otherwise it proceeds to `SYNTHESIZE`. This gives the agent some adaptability (it can choose to re-scrape or skip extraction) while keeping plan generation deterministic.
 
 ### LangGraph agent loop
-PLAN → EXECUTE → EVALUATE → SYNTHESIZE. MCP (Model Context Protocol) server decouples tools from the agent. Each tool wraps self-hosted or external clients with unified interfaces.
+
+**Why:** An agentic system needs a structured loop that plans, executes, evaluates results, and synthesizes answers. LangGraph provides a typed `StateGraph` with built-in state management, conditional edges, and configurable node execution — without building a custom state machine.
+
+**How:** `graph.py` defines a `StateGraph` with `AgentState` (TypedDict) holding `plan`, `step_index`, `results`, `step_vars`, and `answer`. Four nodes — `plan_node`, `execute_node`, `evaluate_node`, `synthesize_node` — are connected via `add_edge` and `add_conditional_edges`. Each node reads and writes to `AgentState`. The MCP server (`FastMCP` with SSE transport) is embedded in the same FastAPI process, decoupling tool implementation from the agent graph. Tools are registered in `registry.py` and called by `execute_node` based on step names.
 
 ### Resilience per service
-Every infrastructure client (SearXNG, Crawl4AI, Bedrock, ES, Redis) is wrapped with CircuitBreaker + Bulkhead + RetryWithBackoff + Timeout. Failures in one service don't cascade.
+
+**Why:** In a multi-service architecture with network-dependent components (SearXNG, Crawl4AI, Bedrock, ES, Redis), any single failure can cascade and block the entire request. Each service needs independent fault isolation.
+
+**How:** Every infrastructure client is wrapped with four resilience patterns:
+- **CircuitBreaker** — trips after N consecutive failures (default 5), resets after a cooldown period (60s), prevents cascading calls to a dead service.
+- **Bulkhead** — limits concurrent calls per service (e.g., 3 concurrent SearXNG requests) via a semaphore.
+- **RetryWithBackoff** — retries up to 3 times with exponential backoff (base 1s, jitter 0.1×) for transient errors (timeouts, 429s, 503s).
+- **Timeout** — per-service timeout via `asyncio.wait_for` (e.g., 15s for SearXNG, 60s for Bedrock).
+
+These are composed as decorator-style wrappers in `src/infrastructure/resilience/`.
 
 ### SSE streaming over polling
-Server-Sent Events stream agent progress and results in real time. The frontend receives incremental updates (plan → step results → final answer) on a single connection.
+
+**Why:** The agent loop takes 30-120 seconds to complete. Polling forces the frontend to repeatedly hit a status endpoint, increasing server load and adding latency between step transitions. SSE provides a single persistent connection with server-pushed updates.
+
+**How:** The `/api/search` endpoint returns `StreamingResponse` with `text/event-stream` content type. The agent runs as a background asyncio task, publishing events to an `asyncio.Queue`. A separate streaming task reads from the queue and yields SSE-formatted lines (`data: {...}\n\n`). The frontend `useSearch.ts` hook opens an `EventSource` connection, parses `type`, `event`, and `done` events, and updates React state accordingly. Connection cleanup happens via `EventSource.close()` on unmount or request cancellation.
 
 ### Heuristic extraction as permanent fallback
-Regex parser (prices in ₹/Rs/$/£/€, bedrooms 2BHK/Studio/Single, amenities AC/WiFi/Power Backup) runs when Bedrock is unavailable. Not a temporary workaround — it ships alongside the LLM extractor.
+
+**Why:** Bedrock Nova Micro can fail due to rate limits, model unavailability, or API errors. A crawling system must still produce results when the LLM is down. A regex-based extractor is deterministic, fast (milliseconds), and requires no external service.
+
+**How:** `extraction.py` implements a two-phase extraction pipeline:
+1. **LLM phase** — sends the raw markdown page content to Bedrock Nova Micro with a structured prompt requesting a JSON array of properties.
+2. **Heuristic fallback** — if the LLM phase returns null, errors, or empty results, a regex parser scans the markdown for:
+   - Prices: `₹\d+[,\d]*`, `Rs\d+`, `$\d+`, `£\d+`, `€\d+`
+   - Bedroom types: `(\d+\s*(BHK|BHK|Bedroom|Bed|Room))|Studio|Single|Double`
+   - Amenities: `AC|WiFi|Power Backup|Parking|Lift|Security`
+   - Ratings: `(\d\.?\d*)\s*(?:/5|star|out of 5)`
+   - Location & title: extracted from heading tags and geographic patterns
+3. Both outputs are normalized to the same `Property` model schema.
 
 ### Idempotent requests via Idempotency-Key
-Redis-backed deduplication with 24h TTL. Same key returns cached result instead of re-running the agent. This prevents duplicate crawls on retries.
+
+**Why:** Network retries, browser double-clicks, and frontend reconnects can trigger duplicate agent runs. Without deduplication, each retry rescrapes the same websites and wastes Bedrock tokens.
+
+**How:** The `IdempotentMiddleware` checks the `Idempotency-Key` header on every `POST /api/search` request. If the key exists in Redis with status `running`, the middleware returns the existing `search_id` and the client reconnects via SSE. If the key exists with status `completed`, the cached SSE events are replayed from Redis. Keys expire after 24h (configurable via `IDEMPOTENCY_TTL`). Redis storage uses the key format `idempotency:{key_hash}` with the SHA-256 hash of the key as the Redis key to prevent header size abuse.
 
 ### PII stripped at extraction and output
-Both the LLM extraction prompt and the final synthesized answer strip personally identifiable information. No phone numbers, emails, or names reach the user or Elasticsearch.
+
+**Why:** Accommodation listings often contain phone numbers, email addresses, and owner names. Exposing PII violates privacy norms and creates liability. Stripping at both stages ensures no PII leaks even if one stage fails.
+
+**How:** The LLM extraction prompt explicitly instructs the model to omit names, phone numbers, and email addresses from the output. A post-processing regex pass in `pii.py` removes remaining matches for:
+- Phone numbers: `\+?\d{1,4}[-.\s]?\d{6,12}`, Indian mobile (`[6-9]\d{9}`), landline patterns
+- Emails: `[\w.+-]+@[\w-]+\.[\w.]+`
+- Names: triggers on `contact`, `call`, `owner`, `landlord` keywords in surrounding context
+
+The same filter runs on the final synthesized answer before it reaches the SSE stream.
 
 ### Time-based ES indices for TTL
-`properties-YYYY.MM.DD` indices let Elasticsearch delete expired data by dropping the index — simpler and cheaper than `_delete_by_query`.
+
+**Why:** Compliance and storage management require automatic data expiration. `_delete_by_query` is slow (scroll-based, one doc at a time) and competes with search traffic. Dropping an entire index is an O(1) filesystem operation.
+
+**How:** `repository.py` builds the index name from the current UTC date: `properties-{datetime.utcnow().strftime('%Y.%m.%d')}`. Each day's data goes into a new index. A lightweight cleanup coroutine in the FastAPI lifespan runs every hour — it lists indices matching `properties-*`, drops any older than 48h, and logs the result. The `template` index template enforces a uniform mapping across all daily indices.
 
 ### Images: original URLs only
-Source image URLs are stored and passed through; no S3 rehosting, no CloudFront signing. Images load directly from the original listing page.
+
+**Why:** Rehosting listing images on S3 multiplies storage costs, requires presigned URL generation, and creates copyright ambiguity. Users click through to the original listing anyway.
+
+**How:** The extraction pipeline extracts `src` attributes from `<img>` tags and stores the absolute URLs as-is in the `Property.images` field. The frontend renders them directly in `<img src={url} />` tags with `loading="lazy"`. No download, upload, or signing step exists anywhere in the pipeline.
 
 ---
 
