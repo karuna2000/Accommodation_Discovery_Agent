@@ -222,8 +222,6 @@ jobs:
         EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
         EC2_USER: ${{ secrets.EC2_USER }}
         EC2_HOST: ${{ secrets.EC2_HOST }}
-        OPENSEARCH_ENDPOINT: ${{ secrets.OPENSEARCH_ENDPOINT }}
-        ELASTICACHE_ENDPOINT: ${{ secrets.ELASTICACHE_ENDPOINT }}
       run: |
         #!/bin/bash
         set -euo pipefail
