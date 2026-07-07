@@ -51,7 +51,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.12'
     
     - name: Cache pip dependencies
       uses: actions/cache@v3
@@ -64,8 +64,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest pytest-asyncio httpx
+        # Install runtime + dev deps from pyproject.toml to ensure version parity with local
+        pip install -e ".[dev]"
     
     - name: Run tests
       env:
@@ -183,34 +183,23 @@ jobs:
         echo "✅ Successfully pushed image: $IMAGE_URI"
     
     - name: Image vulnerability scan
-      run: |
-        # Install Trivy
-        echo "📦 Installing Trivy..."
-        sudo apt-get update -qq
-        sudo apt-get install -qq -y wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list > /dev/null
-        sudo apt-get update -qq
-        sudo apt-get install -qq -y trivy
-        
-        echo ""
-        echo "🔍 Scanning image for vulnerabilities..."
-        trivy image \
-          --exit-code 0 \
-          --severity HIGH,CRITICAL \
-          --format table \
-          ${{ steps.build-image.outputs.image }}
-        
-        echo "✅ Scan completed"
+      # continue-on-error so scan results are informational only — a finding
+      # must never prevent a successfully-built image from being deployed.
+      # Also avoids build-and-push failing (which would null-out image-uri output).
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.build-image.outputs.image }}
+        format: table
+        severity: HIGH,CRITICAL
+        exit-code: '0'
 
   deploy:
     needs: [test, build-and-push]
     runs-on: ubuntu-latest
-    # Allow deploy on main branch pushes OR manual workflow_dispatch from any branch.
-    # Also guard that build-and-push actually succeeded (not skipped) so IMAGE_URI is never null.
-    if: |
-      needs.build-and-push.result == 'success' &&
-      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    # Guard: only deploy when build actually succeeded (not skipped/failed) AND
+    # we're on main (push trigger) or a manual workflow_dispatch from any branch.
+    if: "needs.build-and-push.result == 'success' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')"
     
     steps:
     - name: Configure AWS credentials using OIDC
