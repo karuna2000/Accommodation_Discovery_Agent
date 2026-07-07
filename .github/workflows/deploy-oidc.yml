@@ -249,8 +249,17 @@ jobs:
         
         # Setup SSH
         echo "🔐 Setting up SSH..."
-        echo "$EC2_KEY" > private_key.pem
+        # EC2_PRIVATE_KEY must be stored as base64 in GitHub secrets to preserve
+        # PEM newlines. GitHub sometimes mangles multi-line secrets.
+        echo "$EC2_KEY" | base64 -d > private_key.pem
         chmod 600 private_key.pem
+
+        # Validate the key loaded correctly
+        if ! ssh-keygen -l -f private_key.pem &>/dev/null; then
+          echo "❌ ERROR: private_key.pem is malformed — check EC2_PRIVATE_KEY secret"
+          echo "   The secret must be base64-encoded: cat key.pem | base64 | tr -d '\\n'"
+          exit 1
+        fi
         echo "✅ SSH key configured"
         echo ""
         
