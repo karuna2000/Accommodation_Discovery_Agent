@@ -286,9 +286,7 @@ jobs:
         IMAGE_URI="$1"
         ECR_TOKEN="$2"
         ECR_REGISTRY="$3"
-        OPENSEARCH_ENDPOINT="$4"
-        ELASTICACHE_ENDPOINT="$5"
-        AWS_REGION="$6"
+        AWS_REGION="$4"
         
         echo "🚀 Starting deployment on EC2..."
         echo "📦 Deploying image: $IMAGE_URI"
@@ -337,11 +335,9 @@ jobs:
           --name accommodation-search-api \
           --restart unless-stopped \
           -p 8000:8000 \
-          -e OPENSEARCH_ENDPOINT="$OPENSEARCH_ENDPOINT" \
-          -e ELASTICACHE_ENDPOINT="$ELASTICACHE_ENDPOINT" \
           -e AWS_DEFAULT_REGION="$AWS_REGION" \
           -e XRAY_DAEMON_ADDRESS="127.0.0.1:2000" \
-          -v /home/ec2-user/accommodation-search/logs:/app/logs \
+          -v /home/ubuntu/accommodation-search/logs:/app/logs \
           "$IMAGE_URI"; then
           echo "❌ ERROR: Failed to start container"
           exit 1
@@ -415,7 +411,7 @@ jobs:
           -o ConnectTimeout=10 \
           -o UserKnownHostsFile=/dev/null \
           "$EC2_USER@$EC2_HOST" \
-          "/tmp/deploy_script.sh '$IMAGE_URI' '$ECR_TOKEN' '$ECR_REGISTRY' '$OPENSEARCH_ENDPOINT' '$ELASTICACHE_ENDPOINT' '${{ env.AWS_REGION }}'"; then
+          "/tmp/deploy_script.sh '$IMAGE_URI' '$ECR_TOKEN' '$ECR_REGISTRY' '${{ env.AWS_REGION }}'"; then
           echo "❌ ERROR: Deployment script execution failed"
           exit 1
         fi
