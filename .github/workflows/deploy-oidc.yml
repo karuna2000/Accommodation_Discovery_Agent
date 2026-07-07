@@ -183,25 +183,16 @@ jobs:
         echo "✅ Successfully pushed image: $IMAGE_URI"
     
     - name: Image vulnerability scan
-      run: |
-        # Install Trivy
-        echo "📦 Installing Trivy..."
-        sudo apt-get update -qq
-        sudo apt-get install -qq -y wget apt-transport-https gnupg lsb-release
-        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list > /dev/null
-        sudo apt-get update -qq
-        sudo apt-get install -qq -y trivy
-        
-        echo ""
-        echo "🔍 Scanning image for vulnerabilities..."
-        trivy image \
-          --exit-code 0 \
-          --severity HIGH,CRITICAL \
-          --format table \
-          ${{ steps.build-image.outputs.image }}
-        
-        echo "✅ Scan completed"
+      # continue-on-error so scan results are informational only — a finding
+      # must never prevent a successfully-built image from being deployed.
+      # Also avoids build-and-push failing (which would null-out image-uri output).
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.build-image.outputs.image }}
+        format: table
+        severity: HIGH,CRITICAL
+        exit-code: '0'
 
   deploy:
     needs: [test, build-and-push]
