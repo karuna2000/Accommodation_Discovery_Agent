@@ -382,16 +382,19 @@ jobs:
         
         # Execute deployment on EC2
         echo "📤 Copying deployment script to EC2..."
-        if ! scp -i private_key.pem \
+        echo "  Target: $EC2_USER@$EC2_HOST"
+        if ! scp -v -i private_key.pem \
           -o StrictHostKeyChecking=no \
           -o ConnectTimeout=10 \
           -o UserKnownHostsFile=/dev/null \
-          deploy_script.sh "$EC2_USER@$EC2_HOST:/tmp/"; then
+          deploy_script.sh "$EC2_USER@$EC2_HOST:/tmp/" 2>&1; then
           echo "❌ ERROR: Failed to copy deployment script to EC2"
           echo "Troubleshooting:"
           echo "  1. Verify EC2 instance is running and accessible"
-          echo "  2. Check security group allows port 22"
+          echo "  2. Check security group allows port 22 from 0.0.0.0/0"
           echo "  3. Verify EC2_PRIVATE_KEY, EC2_USER, EC2_HOST are correct"
+          echo "  EC2_USER: $EC2_USER"
+          echo "  EC2_HOST: $EC2_HOST"
           exit 1
         fi
         echo "✅ Deployment script copied to EC2"
