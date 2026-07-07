@@ -131,22 +131,26 @@ class TestSearch:
 
 class TestDeleteOldIndices:
     async def test_deletes_expired_indices(self, repo, mock_es):
-        from datetime import date, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        today = date.today()
-        old_date = (today - timedelta(days=10)).strftime("%Y.%m.%d")  # definitely expired
-        recent_date = (today - timedelta(days=1)).strftime("%Y.%m.%d")  # within retention
+        # Use UTC date to match the cutoff clock in delete_old_indices.
+        # Using local date.today() causes flakiness around midnight in UTC+offset zones.
+        today_utc = datetime.now(timezone.utc).date()
+        old_date = (today_utc - timedelta(days=10)).strftime("%Y.%m.%d")  # definitely expired
+        recent_date = (today_utc - timedelta(days=1)).strftime("%Y.%m.%d")  # within retention
 
+        # Use the repo's actual prefix ("test-props") so prefix-handling regressions are caught.
+        prefix = "test-props"
         mock_es.indices.get.return_value = {
-            f"props-{old_date}": {},
-            f"props-{recent_date}": {},
+            f"{prefix}-{old_date}": {},
+            f"{prefix}-{recent_date}": {},
         }
         mock_es.indices.delete = AsyncMock()
 
         deleted = await repo.delete_old_indices(retention_days=2)
 
         assert deleted == 1
-        mock_es.indices.delete.assert_awaited_once_with(index=f"props-{old_date}")
+        mock_es.indices.delete.assert_awaited_once_with(index=f"{prefix}-{old_date}")
 
     async def test_handles_no_indices(self, repo, mock_es):
         mock_es.indices.get.side_effect = NotFoundError("index not found", {}, {})
