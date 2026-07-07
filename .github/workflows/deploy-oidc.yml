@@ -356,7 +356,7 @@ jobs:
         RETRY_COUNT=0
         
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-          if curl -f http://localhost:8000/health 2>/dev/null; then
+          if curl -f http://localhost:8000/api/health 2>/dev/null; then
             echo "✅ Health check passed!"
             echo "✅ Deployment successful!"
             echo "🌐 Application is running at: http://localhost:8000"
@@ -429,7 +429,7 @@ jobs:
         sleep 5
         
         echo "Attempting health check from GitHub Actions runner..."
-        if timeout 10 curl -f "http://${{ secrets.EC2_HOST }}:8000/health" 2>/dev/null; then
+        if timeout 10 curl -f "http://${{ secrets.EC2_HOST }}:8000/api/health" 2>/dev/null; then
           echo "✅ Health check passed from runner!"
         else
           echo "⚠️  Could not reach EC2 from runner (normal if EC2 is private)"
