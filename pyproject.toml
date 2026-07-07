@@ -23,6 +23,14 @@ dependencies = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
+[tool.pyright]
+pythonVersion = "3.12"
+# Treat the project root as an import root so `from src.domain.*` resolves correctly.
+# Pylance infers src/ as the root from the src-layout, but we import with the `src.` prefix.
+extraPaths = ["."]
+venvPath = "."
+venv = ".venv"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",

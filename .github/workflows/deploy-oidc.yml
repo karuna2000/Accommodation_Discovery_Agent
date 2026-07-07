@@ -1,0 +1,488 @@
+name: Deploy with OIDC Authentication
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+  
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+# Required for OIDC authentication
+permissions:
+  id-token: write   # Required for requesting JWT
+  contents: read    # Required for actions/checkout
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio httpx
+    
+    - name: Run tests
+      env:
+        REDIS_URL: redis://localhost:6379
+      run: |
+        if [ -d "tests" ] && [ -n "$(find tests -name '*.py' -type f)" ]; then
+          echo "✅ Running tests..."
+          pytest tests/ -v --tb=short
+        else
+          echo "⚠️  No tests found in tests/ directory"
+          echo "ℹ️  Create test files in tests/*.py to enable testing"
+        fi
+    
+    - name: Lint code
+      run: |
+        pip install flake8 black
+        echo "🔍 Running flake8..."
+        flake8 src/ --max-line-length=88 --extend-ignore=E203,W503 || true
+        echo "🔍 Running black..."
+        black --check src/ || true
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image-uri: ${{ steps.build-image.outputs.image }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        role-session-name: GitHubActions-${{ github.run_id }}
+        aws-region: ${{ env.AWS_REGION }}
+        role-duration-seconds: 3600  # 1 hour
+    
+    - name: Verify AWS identity
+      run: |
+        echo "🔐 AWS Identity Information:"
+        aws sts get-caller-identity
+        echo "AWS Region: ${{ env.AWS_REGION }}"
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        set -euo pipefail  # Exit on error, undefined vars, pipe failures
+        
+        echo "🔍 Validating environment variables..."
+        
+        # Validate ECR configuration
+        if [ -z "$ECR_REGISTRY" ]; then
+          echo "❌ ERROR: ECR_REGISTRY is empty. ECR login may have failed."
+          exit 1
+        fi
+        
+        if [ -z "$ECR_REPOSITORY" ]; then
+          echo "❌ ERROR: ECR_REPOSITORY secret not configured"
+          exit 1
+        fi
+        
+        echo "✅ ECR Configuration valid"
+        echo "  Registry: $ECR_REGISTRY"
+        echo "  Repository: $ECR_REPOSITORY"
+        echo "  Tag: $IMAGE_TAG"
+        
+        echo ""
+        echo "🐳 Building Docker image..."
+        
+        # Build Docker image with build args
+        docker build \
+          --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+          --build-arg VCS_REF=${{ github.sha }} \
+          --build-arg VERSION=${{ github.ref_name }} \
+          -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+          -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" . || {
+          echo "❌ ERROR: Docker build failed"
+          exit 1
+        }
+        
+        echo "✅ Docker image built successfully"
+        
+        echo ""
+        echo "📤 Pushing images to ECR..."
+        
+        docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" || {
+          echo "❌ ERROR: Failed to push image with tag $IMAGE_TAG"
+          exit 1
+        }
+        
+        docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest" || {
+          echo "❌ ERROR: Failed to push latest image"
+          exit 1
+        }
+        
+        # Set output variable
+        IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+        echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+        
+        # Verify output was set
+        if ! grep -q "^image=" $GITHUB_OUTPUT; then
+          echo "❌ ERROR: Failed to set image output variable"
+          exit 1
+        fi
+        
+        echo "✅ Successfully pushed image: $IMAGE_URI"
+    
+    - name: Image vulnerability scan
+      run: |
+        # Install Trivy
+        echo "📦 Installing Trivy..."
+        sudo apt-get update -qq
+        sudo apt-get install -qq -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list > /dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -qq -y trivy
+        
+        echo ""
+        echo "🔍 Scanning image for vulnerabilities..."
+        trivy image \
+          --exit-code 0 \
+          --severity HIGH,CRITICAL \
+          --format table \
+          ${{ steps.build-image.outputs.image }}
+        
+        echo "✅ Scan completed"
+
+  deploy:
+    needs: [test, build-and-push]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Configure AWS credentials using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Deploy to EC2
+      env:
+        IMAGE_URI: ${{ needs.build-and-push.outputs.image-uri }}
+        EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+      run: |
+        #!/bin/bash
+        set -euo pipefail
+        
+        echo "🚀 Starting deployment to EC2..."
+        echo ""
+        
+        # Validate environment variables
+        echo "🔍 Validating deployment configuration..."
+        
+        if [ -z "$IMAGE_URI" ]; then
+          echo "❌ ERROR: IMAGE_URI is empty (image was not built)"
+          exit 1
+        fi
+        
+        if [ -z "$EC2_KEY" ]; then
+          echo "❌ ERROR: EC2_PRIVATE_KEY secret not configured"
+          exit 1
+        fi
+        
+        if [ -z "$EC2_USER" ]; then
+          echo "❌ ERROR: EC2_USER secret not configured"
+          exit 1
+        fi
+        
+        if [ -z "$EC2_HOST" ]; then
+          echo "❌ ERROR: EC2_HOST secret not configured"
+          exit 1
+        fi
+        
+        echo "✅ All required secrets configured"
+        echo "  IMAGE_URI: $IMAGE_URI"
+        echo "  EC2_USER: $EC2_USER"
+        echo "  EC2_HOST: $EC2_HOST"
+        echo ""
+        
+        # Setup SSH
+        echo "🔐 Setting up SSH..."
+        echo "$EC2_KEY" > private_key.pem
+        chmod 600 private_key.pem
+        echo "✅ SSH key configured"
+        echo ""
+        
+        # Get ECR login token for EC2
+        echo "🔑 Getting ECR login token..."
+        ECR_TOKEN=$(aws ecr get-login-password --region "${{ env.AWS_REGION }}")
+        
+        if [ -z "$ECR_TOKEN" ]; then
+          echo "❌ ERROR: Failed to get ECR token"
+          exit 1
+        fi
+        
+        ECR_REGISTRY=$(echo "$IMAGE_URI" | cut -d'/' -f1)
+        echo "✅ ECR token obtained"
+        echo "  Registry: $ECR_REGISTRY"
+        echo ""
+        
+        # Create deployment script
+        echo "📝 Creating deployment script..."
+        cat > deploy_script.sh << 'DEPLOY_EOF'
+        #!/bin/bash
+        set -euo pipefail
+        
+        IMAGE_URI="$1"
+        ECR_TOKEN="$2"
+        ECR_REGISTRY="$3"
+        OPENSEARCH_ENDPOINT="$4"
+        ELASTICACHE_ENDPOINT="$5"
+        AWS_REGION="$6"
+        
+        echo "🚀 Starting deployment on EC2..."
+        echo "📦 Deploying image: $IMAGE_URI"
+        echo ""
+        
+        # Login to ECR on EC2
+        echo "🔑 Logging in to ECR..."
+        if ! echo "$ECR_TOKEN" | docker login --username AWS --password-stdin "$ECR_REGISTRY" 2>/dev/null; then
+          echo "❌ ERROR: Failed to login to ECR"
+          exit 1
+        fi
+        echo "✅ ECR login successful"
+        echo ""
+        
+        # Stop existing container
+        echo "🛑 Stopping existing container..."
+        docker stop accommodation-search-api || true
+        docker rm accommodation-search-api || true
+        echo "✅ Old container stopped"
+        echo ""
+        
+        # Clean up old images (keep last 3)
+        echo "🧹 Cleaning up old images..."
+        IMAGES_TO_DELETE=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}" | \
+          grep accommodation-search-api | tail -n +4 | awk '{print $3}')
+        
+        if [ -n "$IMAGES_TO_DELETE" ]; then
+          echo "$IMAGES_TO_DELETE" | xargs -r docker rmi || true
+          echo "✅ Old images cleaned up"
+        else
+          echo "ℹ️  No old images to clean up"
+        fi
+        echo ""
+        
+        # Pull and run new container
+        echo "📥 Pulling new image..."
+        if ! docker pull "$IMAGE_URI"; then
+          echo "❌ ERROR: Failed to pull image"
+          exit 1
+        fi
+        echo "✅ Image pulled successfully"
+        echo ""
+        
+        echo "▶️  Starting container..."
+        if ! docker run -d \
+          --name accommodation-search-api \
+          --restart unless-stopped \
+          -p 8000:8000 \
+          -e OPENSEARCH_ENDPOINT="$OPENSEARCH_ENDPOINT" \
+          -e ELASTICACHE_ENDPOINT="$ELASTICACHE_ENDPOINT" \
+          -e AWS_DEFAULT_REGION="$AWS_REGION" \
+          -e XRAY_DAEMON_ADDRESS="127.0.0.1:2000" \
+          -v /home/ec2-user/accommodation-search/logs:/app/logs \
+          "$IMAGE_URI"; then
+          echo "❌ ERROR: Failed to start container"
+          exit 1
+        fi
+        echo "✅ Container started"
+        echo ""
+        
+        # Wait for container to start
+        echo "⏳ Waiting for container to start..."
+        sleep 15
+        echo ""
+        
+        # Health check with retries
+        echo "🏥 Running health checks..."
+        MAX_RETRIES=5
+        RETRY_COUNT=0
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+          if curl -f http://localhost:8000/health 2>/dev/null; then
+            echo "✅ Health check passed!"
+            echo "✅ Deployment successful!"
+            echo "🌐 Application is running at: http://localhost:8000"
+            exit 0
+          fi
+          
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+          
+          if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+            echo "⚠️  Health check attempt $RETRY_COUNT/$MAX_RETRIES failed, retrying..."
+            sleep 5
+          fi
+        done
+        
+        echo "❌ ERROR: Health check failed after $MAX_RETRIES attempts!"
+        echo ""
+        echo "📋 Container logs:"
+        docker logs accommodation-search-api || true
+        echo ""
+        echo "📊 Container status:"
+        docker ps -a --filter "name=accommodation-search-api" || true
+        exit 1
+        DEPLOY_EOF
+        
+        chmod +x deploy_script.sh
+        echo "✅ Deployment script created"
+        echo ""
+        
+        # Execute deployment on EC2
+        echo "📤 Copying deployment script to EC2..."
+        if ! scp -i private_key.pem \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          -o UserKnownHostsFile=/dev/null \
+          deploy_script.sh "$EC2_USER@$EC2_HOST:/tmp/"; then
+          echo "❌ ERROR: Failed to copy deployment script to EC2"
+          echo "Troubleshooting:"
+          echo "  1. Verify EC2 instance is running and accessible"
+          echo "  2. Check security group allows port 22"
+          echo "  3. Verify EC2_PRIVATE_KEY, EC2_USER, EC2_HOST are correct"
+          exit 1
+        fi
+        echo "✅ Deployment script copied to EC2"
+        echo ""
+        
+        echo "🚀 Executing deployment script on EC2..."
+        if ! ssh -i private_key.pem \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 \
+          -o UserKnownHostsFile=/dev/null \
+          "$EC2_USER@$EC2_HOST" \
+          "/tmp/deploy_script.sh '$IMAGE_URI' '$ECR_TOKEN' '$ECR_REGISTRY' '$OPENSEARCH_ENDPOINT' '$ELASTICACHE_ENDPOINT' '${{ env.AWS_REGION }}'"; then
+          echo "❌ ERROR: Deployment script execution failed"
+          exit 1
+        fi
+        
+        # Cleanup
+        rm -f private_key.pem
+        
+        echo ""
+        echo "🎉 Deployment completed successfully!"
+    
+    - name: Post-deployment verification
+      if: success()
+      run: |
+        echo "🔍 Running post-deployment checks..."
+        sleep 5
+        
+        echo "Attempting health check from GitHub Actions runner..."
+        if timeout 10 curl -f "http://${{ secrets.EC2_HOST }}:8000/health" 2>/dev/null; then
+          echo "✅ Health check passed from runner!"
+        else
+          echo "⚠️  Could not reach EC2 from runner (normal if EC2 is private)"
+          echo "ℹ️  Health check passed during deployment on EC2"
+        fi
+        
+        echo ""
+        echo "✅ Deployment verified!"
+        echo "📊 Application running at: http://${{ secrets.EC2_HOST }}:8000"
+
+  notify:
+    needs: [test, build-and-push, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Deployment notification
+      run: |
+        echo "📊 Deployment Summary"
+        echo "===================="
+        echo ""
+        
+        if [ "${{ needs.deploy.result }}" == "success" ]; then
+          echo "✅ Status: SUCCESS"
+          echo ""
+          echo "Deployment Details:"
+          echo "  📦 Image: ${{ needs.build-and-push.outputs.image-uri }}"
+          echo "  🌐 Application: http://${{ secrets.EC2_HOST }}:8000"
+          echo "  📊 CloudWatch Dashboard: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#dashboards:name=AccommodationSearchDashboard"
+          echo "  🔍 X-Ray Traces: https://console.aws.amazon.com/xray/home?region=${{ env.AWS_REGION }}#/traces"
+          echo ""
+          echo "🎉 Deployment completed successfully!"
+        else
+          DEPLOY_STATUS="${{ needs.deploy.result }}"
+          BUILD_STATUS="${{ needs.build-and-push.result }}"
+          TEST_STATUS="${{ needs.test.result }}"
+          
+          echo "❌ Status: FAILED"
+          echo ""
+          echo "Job Status:"
+          echo "  Test: $TEST_STATUS"
+          echo "  Build: $BUILD_STATUS"
+          echo "  Deploy: $DEPLOY_STATUS"
+          echo ""
+          echo "🔍 Check the workflow logs for details:"
+          echo "  https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo ""
+          echo "📋 Troubleshooting steps:"
+          echo "  1. Check job logs for error messages"
+          echo "  2. Verify all GitHub secrets are configured"
+          echo "  3. Ensure EC2 instance is running and accessible"
+          echo "  4. Run: bash troubleshoot.sh to diagnose issues"
+        fi

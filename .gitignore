@@ -28,3 +28,7 @@ searxng/
 */.vite
 */FLOW.md
 */PRODUCT_UX.MD
+
+ideaAndplan/architecture_decision.md
+ideaAndplan/aws_services.md
+accommodation-search-key.pem
