@@ -129,22 +129,28 @@ class TestSearch:
         assert any("tags" in str(f) for f in filters)
 
 
-# class TestDeleteOldIndices:
-#     async def test_deletes_expired_indices(self, repo, mock_es):
-#         mock_es.indices.get.return_value = {
-#             "props-2026.01.01": {},
-#             "props-2026.06.30": {},
-#         }
-#         mock_es.indices.delete = AsyncMock()
+class TestDeleteOldIndices:
+    async def test_deletes_expired_indices(self, repo, mock_es):
+        from datetime import date, timedelta
 
-#         deleted = await repo.delete_old_indices(retention_days=2)
+        today = date.today()
+        old_date = (today - timedelta(days=10)).strftime("%Y.%m.%d")  # definitely expired
+        recent_date = (today - timedelta(days=1)).strftime("%Y.%m.%d")  # within retention
 
-#         assert deleted == 1
-#         mock_es.indices.delete.assert_awaited_once_with(index="props-2026.01.01")
+        mock_es.indices.get.return_value = {
+            f"props-{old_date}": {},
+            f"props-{recent_date}": {},
+        }
+        mock_es.indices.delete = AsyncMock()
 
-#     async def test_handles_no_indices(self, repo, mock_es):
-#         mock_es.indices.get.side_effect = NotFoundError("index not found", {}, {})
+        deleted = await repo.delete_old_indices(retention_days=2)
 
-#         deleted = await repo.delete_old_indices()
+        assert deleted == 1
+        mock_es.indices.delete.assert_awaited_once_with(index=f"props-{old_date}")
 
-#         assert deleted == 0
+    async def test_handles_no_indices(self, repo, mock_es):
+        mock_es.indices.get.side_effect = NotFoundError("index not found", {}, {})
+
+        deleted = await repo.delete_old_indices()
+
+        assert deleted == 0
