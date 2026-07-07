@@ -51,7 +51,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.12'
     
     - name: Cache pip dependencies
       uses: actions/cache@v3
@@ -64,8 +64,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest pytest-asyncio httpx
+        # Install runtime + dev deps from pyproject.toml to ensure version parity with local
+        pip install -e ".[dev]"
     
     - name: Run tests
       env:
@@ -206,11 +206,9 @@ jobs:
   deploy:
     needs: [test, build-and-push]
     runs-on: ubuntu-latest
-    # Allow deploy on main branch pushes OR manual workflow_dispatch from any branch.
-    # Also guard that build-and-push actually succeeded (not skipped) so IMAGE_URI is never null.
-    if: |
-      needs.build-and-push.result == 'success' &&
-      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    # Guard: only deploy when build actually succeeded (not skipped/failed) AND
+    # we're on main (push trigger) or a manual workflow_dispatch from any branch.
+    if: "needs.build-and-push.result == 'success' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')"
     
     steps:
     - name: Configure AWS credentials using OIDC
