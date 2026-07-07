@@ -197,9 +197,9 @@ jobs:
   deploy:
     needs: [test, build-and-push]
     runs-on: ubuntu-latest
-    # Guard: only deploy when build actually succeeded (not skipped/failed) AND
-    # we're on main (push trigger) or a manual workflow_dispatch from any branch.
-    if: "needs.build-and-push.result == 'success' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')"
+    # Use ${{ }} syntax — bare double-quoted strings can be treated as truthy
+    # non-empty strings by GitHub Actions, bypassing the guard entirely.
+    if: ${{ needs.build-and-push.result == 'success' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}
     
     steps:
     - name: Configure AWS credentials using OIDC
@@ -209,6 +209,27 @@ jobs:
         role-session-name: GitHubActions-Deploy-${{ github.run_id }}
         aws-region: ${{ env.AWS_REGION }}
     
+    - name: Diagnose job context
+      run: |
+        echo "=== Deploy Job Diagnostics ==="
+        echo "build-and-push result : ${{ needs.build-and-push.result }}"
+        echo "image-uri output      : ${{ needs.build-and-push.outputs.image-uri }}"
+        echo "github.ref            : ${{ github.ref }}"
+        echo "github.event_name     : ${{ github.event_name }}"
+        echo "github.sha            : ${{ github.sha }}"
+        echo "IMAGE_URI (env)       : $IMAGE_URI"
+        if [ -z "$IMAGE_URI" ]; then
+          echo "❌ DIAGNOSIS: IMAGE_URI is empty."
+          echo "   This means 'needs.build-and-push.outputs.image-uri' resolved to empty."
+          echo "   build-and-push result is '${{ needs.build-and-push.result }}'."
+          echo "   If result is not 'success', the job-level if guard is not working."
+          exit 1
+        else
+          echo "✅ IMAGE_URI is set correctly: $IMAGE_URI"
+        fi
+      env:
+        IMAGE_URI: ${{ needs.build-and-push.outputs.image-uri }}
+
     - name: Deploy to EC2
       env:
         IMAGE_URI: ${{ needs.build-and-push.outputs.image-uri }}
