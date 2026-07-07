@@ -206,7 +206,11 @@ jobs:
   deploy:
     needs: [test, build-and-push]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # Allow deploy on main branch pushes OR manual workflow_dispatch from any branch.
+    # Also guard that build-and-push actually succeeded (not skipped) so IMAGE_URI is never null.
+    if: |
+      needs.build-and-push.result == 'success' &&
+      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     
     steps:
     - name: Configure AWS credentials using OIDC
