@@ -311,7 +311,7 @@ jobs:
         # Clean up old images (keep last 3)
         echo "🧹 Cleaning up old images..."
         IMAGES_TO_DELETE=$(docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}" | \
-          grep accommodation-search-api | tail -n +4 | awk '{print $3}')
+          grep accommodation-search-api | tail -n +4 | awk '{print $3}' || true)
         
         if [ -n "$IMAGES_TO_DELETE" ]; then
           echo "$IMAGES_TO_DELETE" | xargs -r docker rmi || true
