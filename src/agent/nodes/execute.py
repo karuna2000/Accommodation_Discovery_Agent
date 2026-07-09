@@ -260,7 +260,7 @@ async def execute_node(state: dict[str, Any], config: RunnableConfig) -> dict[st
         return {"step_index": step_idx + 1, "step_vars": step_vars, "page_stats": page_stats}
 
     if tool_name == "extract_property":
-        from src.domain.models.property import CrawledProperty, Location
+        from src.domain.models.property import CrawledProperty
 
         props = result if isinstance(result, list) else ([result] if isinstance(result, dict) else [])
         matched = _filter_properties_by_query(props, state.get("query", ""))
